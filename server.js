@@ -14,6 +14,7 @@ if (!fs.existsSync(liveDir)) {
   fs.mkdirSync(liveDir, { recursive: true });
 }
 
+// জিরো বাফার ও ফাস্ট লোডিং হেডার
 app.use('/live', express.static(liveDir, {
   setHeaders: (res, filePath) => {
     res.set('Access-Control-Allow-Origin', '*');
@@ -28,37 +29,91 @@ app.use('/live', express.static(liveDir, {
 }));
 
 app.get('/', (req, res) => {
-  res.send('BDStreamHub Live Server Running 100% Smoothly!');
+  res.send('BDStreamHub Multi-Source Live Server Running Smoothly!');
 });
 
+function parseDirectUrl(url) {
+  // গুগল ড্রাইভ ভিউ লিংক স্বয়ংক্রিয়ভাবে ডাইরেক্ট স্ট্রিমে কনভার্ট করা
+  if (url.includes('drive.google.com')) {
+    const match = url.match(/\/d\/([a-zA-Z0-9_-]+)/) || url.match(/id=([a-zA-Z0-9_-]+)/);
+    if (match && match[1]) {
+      return `https://drive.google.com/uc?export=download&id=${match[1]}`;
+    }
+  }
+  return url;
+}
+
 function startStream() {
-  const videoPath = path.join(__dirname, 'video', 'branded.mp4');
-  
-  if (!fs.existsSync(videoPath)) {
-    console.error('branded.mp4 not found yet!');
+  const playlistFile = path.join(__dirname, 'playlist.txt');
+  if (!fs.existsSync(playlistFile)) {
+    console.error('playlist.txt file not found!');
     return;
   }
 
-  console.log('Broadcasting branded video with 0% CPU...');
+  const lines = fs.readFileSync(playlistFile, 'utf8')
+    .split('\n')
+    .map(l => l.trim())
+    .filter(Boolean);
 
-  // কোনো এনকোডিং ছাড়া সরাসরি লাইভ স্ট্রিমিং (-c copy)
-  const ffmpegArgs = [
-    '-re',
-    '-stream_loop', '-1',
-    '-i', videoPath,
-    '-c', 'copy',
-    '-f', 'hls',
-    '-hls_time', '2',
-    '-hls_list_size', '6',
-    '-hls_flags', 'delete_segments',
-    path.join(liveDir, 'stream.m3u8')
-  ];
+  if (lines.length === 0) {
+    console.error('playlist.txt is empty!');
+    return;
+  }
+
+  let sourceUrl = parseDirectUrl(lines[0]);
+  console.log('Detected Source:', sourceUrl);
+
+  let ffmpegArgs = [];
+
+  // ১. সোর্স যদি সরাসরি .m3u8 হয় (Zero CPU Relay - নো বাফারিং)
+  if (sourceUrl.includes('.m3u8')) {
+    console.log('Mode: Direct HLS Relay');
+    ffmpegArgs = [
+      '-re',
+      '-headers', 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\n',
+      '-i', sourceUrl,
+      '-c', 'copy',
+      '-f', 'hls',
+      '-hls_time', '2',
+      '-hls_list_size', '6',
+      '-hls_flags', 'delete_segments',
+      path.join(liveDir, 'stream.m3u8')
+    ];
+  } 
+  // ২. সোর্স যদি Google Drive, Archive.org বা যেকোনো MP4 হয়
+  else {
+    console.log('Mode: Optimized Dynamic Stream');
+    ffmpegArgs = [
+      '-re',
+      '-stream_loop', '-1',
+      '-user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+      '-i', sourceUrl,
+      '-vf', "scale=1280:-2,drawtext=text='BDStreamHub TV':x=w-tw-25:y=25:fontsize=28:fontcolor=white:box=1:boxcolor=black@0.5:boxborderw=4,drawtext=text='Welcome to BDStreamHub Live - 24/7 Entertainment':x=w-mod(max(t\\,0)*80\\,w+tw):y=h-35:fontsize=18:fontcolor=yellow:box=1:boxcolor=black@0.6:boxborderw=5",
+      '-c:v', 'libx264',
+      '-preset', 'ultrafast',
+      '-tune', 'zerolatency',
+      '-b:v', '900k',
+      '-maxrate', '1100k',
+      '-bufsize', '2000k',
+      '-c:a', 'aac',
+      '-b:a', '64k',
+      '-f', 'hls',
+      '-hls_time', '3',
+      '-hls_list_size', '8',
+      '-hls_flags', 'delete_segments+split_by_time',
+      path.join(liveDir, 'stream.m3u8')
+    ];
+  }
 
   const ffmpegProcess = spawn('ffmpeg', ffmpegArgs);
 
+  ffmpegProcess.stderr.on('data', (data) => {
+    // প্রয়োজন হলে লগ দেখতে পারেন
+  });
+
   ffmpegProcess.on('close', (code) => {
-    console.log(`Stream ended (${code}), looping again...`);
-    setTimeout(startStream, 1000);
+    console.log(`Stream stopped (${code}). Auto-restarting in 2s...`);
+    setTimeout(startStream, 2000);
   });
 }
 
