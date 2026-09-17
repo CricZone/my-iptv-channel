@@ -29,7 +29,7 @@ app.use('/live', express.static(liveDir, {
 }));
 
 app.get('/', (req, res) => {
-  res.send('BDStreamHub Zero-Buffer Drive Live Running!');
+  res.send('BDStreamHub Sequential Live Streaming Running!');
 });
 
 // গুগল ড্রাইভ ডাইরেক্ট স্ট্রিম কনভার্টার
@@ -43,6 +43,9 @@ function parseDirectUrl(url) {
   return url;
 }
 
+// ভিডিও ট্র্যাকার ইন্ডেক্স
+let currentIndex = 0;
+
 function startStream() {
   const playlistFile = path.join(__dirname, 'playlist.txt');
   if (!fs.existsSync(playlistFile)) {
@@ -51,6 +54,7 @@ function startStream() {
     return;
   }
 
+  // প্রতিবার নতুন করে ফাইল পড়ে যাতে নতুন লিংক যোগ করলে রিস্টার্ট ছাড়া পেয়ে যায়
   const lines = fs.readFileSync(playlistFile, 'utf8')
     .split('\n')
     .map(l => l.trim())
@@ -62,20 +66,25 @@ function startStream() {
     return;
   }
 
-  const sourceUrl = parseDirectUrl(lines[0]);
-  console.log('Streaming directly from Google Drive:', sourceUrl);
+  // সব ভিডিও শেষ হলে স্বয়ংক্রিয়ভাবে আবার ১ নম্বর ভিডিওতে ব্যাক করবে
+  if (currentIndex >= lines.length) {
+    currentIndex = 0;
+  }
 
-  // ০ বাফার রুল: রেন্ডার কোনো রিকোডিং করবে না, সরাসরি গুগল ড্রাইভ থেকে প্যাকেট নিয়ে HLS বানাবে (CPU ব্যবহার ০%)
+  const rawUrl = lines[currentIndex];
+  const sourceUrl = parseDirectUrl(rawUrl);
+  console.log(`[Playing Video ${currentIndex + 1} of ${lines.length}]: ${sourceUrl}`);
+
+  // -c copy মোডে ০% সিপিইউ লোডে ধারাবাহিক প্লেলিস্ট তৈরি
   const ffmpegArgs = [
     '-re',
-    '-stream_loop', '-1',
     '-user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
     '-i', sourceUrl,
     '-c', 'copy',
     '-f', 'hls',
     '-hls_time', '3',
     '-hls_list_size', '6',
-    '-hls_flags', 'delete_segments',
+    '-hls_flags', 'delete_segments+append_list',
     path.join(liveDir, 'stream.m3u8')
   ];
 
@@ -84,7 +93,14 @@ function startStream() {
   ffmpegProcess.stderr.on('data', () => {});
 
   ffmpegProcess.on('close', (code) => {
-    console.log(`Stream ended (${code}). Restarting in 2s...`);
+    console.log(`Video ${currentIndex + 1} finished (${code}). Next video starting...`);
+    currentIndex++; // পরবর্তী ভিডিওর ইন্ডেক্স
+    setTimeout(startStream, 1000);
+  });
+
+  ffmpegProcess.on('error', (err) => {
+    console.error('FFmpeg process error:', err.message);
+    currentIndex++;
     setTimeout(startStream, 2000);
   });
 }
