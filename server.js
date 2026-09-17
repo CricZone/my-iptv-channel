@@ -14,7 +14,6 @@ if (!fs.existsSync(liveDir)) {
   fs.mkdirSync(liveDir, { recursive: true });
 }
 
-// ক্যাশলেস ও স্মুথ হেডার
 app.use('/live', express.static(liveDir, {
   setHeaders: (res, filePath) => {
     res.set('Access-Control-Allow-Origin', '*');
@@ -29,49 +28,37 @@ app.use('/live', express.static(liveDir, {
 }));
 
 app.get('/', (req, res) => {
-  res.send('BDStreamHub Live Server Running Smoothly!');
+  res.send('BDStreamHub Live Server Running 100% Smoothly!');
 });
 
 function startStream() {
-  const playlistFile = path.join(__dirname, 'playlist.txt');
-  if (!fs.existsSync(playlistFile)) return;
+  const videoPath = path.join(__dirname, 'video', 'branded.mp4');
+  
+  if (!fs.existsSync(videoPath)) {
+    console.error('branded.mp4 not found yet!');
+    return;
+  }
 
-  const lines = fs.readFileSync(playlistFile, 'utf8')
-    .split('\n')
-    .map(l => l.trim())
-    .filter(Boolean);
+  console.log('Broadcasting branded video with 0% CPU...');
 
-  if (lines.length === 0) return;
-
-  const videoUrl = lines[0];
-  console.log('Streaming source:', videoUrl);
-
-  // লো-রিসোর্স ও বড় বাফার কনফিগারেশন (যাতে কখনই ফ্রেম ড্রপ না হয়)
+  // কোনো এনকোডিং ছাড়া সরাসরি লাইভ স্ট্রিমিং (-c copy)
   const ffmpegArgs = [
     '-re',
     '-stream_loop', '-1',
-    '-i', videoUrl,
-    '-vf', "scale=1280:-2,drawtext=text='BDStreamHub TV':x=w-tw-20:y=20:fontsize=24:fontcolor=white:box=1:boxcolor=black@0.5:boxborderw=4,drawtext=text='Welcome to BDStreamHub - Watch Live Movies and Entertainment Non-Stop!':x=w-mod(max(t\\,0)*80\\,w+tw):y=h-35:fontsize=18:fontcolor=yellow:box=1:boxcolor=black@0.6:boxborderw=6",
-    '-c:v', 'libx264',
-    '-preset', 'ultrafast',
-    '-tune', 'zerolatency',
-    '-b:v', '1000k',
-    '-maxrate', '1200k',
-    '-bufsize', '2400k',
-    '-c:a', 'aac',
-    '-b:a', '96k',
+    '-i', videoPath,
+    '-c', 'copy',
     '-f', 'hls',
-    '-hls_time', '3',
-    '-hls_list_size', '8',
-    '-hls_flags', 'delete_segments+split_by_time',
+    '-hls_time', '2',
+    '-hls_list_size', '6',
+    '-hls_flags', 'delete_segments',
     path.join(liveDir, 'stream.m3u8')
   ];
 
   const ffmpegProcess = spawn('ffmpeg', ffmpegArgs);
 
   ffmpegProcess.on('close', (code) => {
-    console.log(`Stream exited with code ${code}. Auto-restarting in 2s...`);
-    setTimeout(startStream, 2000);
+    console.log(`Stream ended (${code}), looping again...`);
+    setTimeout(startStream, 1000);
   });
 }
 
