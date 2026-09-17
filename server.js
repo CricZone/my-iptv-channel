@@ -96,7 +96,7 @@ function startStream() {
       '-stream_loop', '-1',
       '-user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
       '-i', sourceUrl,
-      '-vf', "scale=1280:-2,drawtext=text='BDStreamHub TV':x=w-tw-25:y=25:fontsize=28:fontcolor=white:box=1:boxcolor=black@0.5:boxborderw=4,drawtext=text='Welcome to BDStreamHub Live - 24/7 Entertainment':x=w-mod(max(t\\,0)*80\\,w+tw):y=h-35:fontsize=18:fontcolor=yellow:box=1:boxcolor=black@0.6:boxborderw=5",
+      '-vf', "scale=1280:-2,drawtext=text='BDStreamHub TV':x=w-tw-25:y=25:fontsize=28:fontcolor=white:box=1:boxcolor=black@0.5:boxborderw=4,drawtext=text='* WELCOME TO BDSTREAMHUB * 24/7 LIVE TV STREAMING * WATCH LIVE TV CHANNELS * ENJOY LIVE SPORTS INCLUDING FOOTBALL & CRICKET * WATCH MOVIES, SHOWS & ENTERTAINMENT * DOWNLOAD THE BDSTREAMHUB APP * SEARCH BDSTREAMHUB ON GOOGLE * TELEGRAM @bdstreamhub00 * NEW CHANNELS & REGULAR UPDATES AVAILABLE * STAY CONNECTED WITH BDSTREAMHUB *':x=w-mod(max(t\\,0)*80\\,w+tw):y=h-35:fontsize=18:fontcolor=yellow:box=1:boxcolor=black@0.6:boxborderw=5",
       '-c:v', 'libx264',
       '-preset', 'ultrafast',
       '-tune', 'zerolatency',
