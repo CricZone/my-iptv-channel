@@ -5,17 +5,16 @@ const fs = require('fs');
 const path = require('path');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 
 app.use(cors());
 
-// live ডিরেক্টরি নিশ্চিত করা
 const liveDir = path.join(__dirname, 'live');
 if (!fs.existsSync(liveDir)) {
   fs.mkdirSync(liveDir, { recursive: true });
 }
 
-// স্ট্যাটিক HLS ফাইল সার্ভ করা
+// ক্যাশলেস ও স্মুথ হেডার
 app.use('/live', express.static(liveDir, {
   setHeaders: (res, filePath) => {
     res.set('Access-Control-Allow-Origin', '*');
@@ -30,16 +29,12 @@ app.use('/live', express.static(liveDir, {
 }));
 
 app.get('/', (req, res) => {
-  res.send('BDStreamHub Cloud IPTV Server is Running!');
+  res.send('BDStreamHub Live Server Running Smoothly!');
 });
 
-// লাইভ স্ট্রিম ইঞ্জিন
 function startStream() {
   const playlistFile = path.join(__dirname, 'playlist.txt');
-  if (!fs.existsSync(playlistFile)) {
-    console.error('playlist.txt not found!');
-    return;
-  }
+  if (!fs.existsSync(playlistFile)) return;
 
   const lines = fs.readFileSync(playlistFile, 'utf8')
     .split('\n')
@@ -49,41 +44,37 @@ function startStream() {
   if (lines.length === 0) return;
 
   const videoUrl = lines[0];
-  console.log('Starting stream for:', videoUrl);
+  console.log('Streaming source:', videoUrl);
 
+  // লো-রিসোর্স ও বড় বাফার কনফিগারেশন (যাতে কখনই ফ্রেম ড্রপ না হয়)
   const ffmpegArgs = [
     '-re',
     '-stream_loop', '-1',
     '-i', videoUrl,
-    '-vf', "drawtext=text='BDStreamHub TV':x=w-tw-30:y=30:fontsize=32:fontcolor=white:box=1:boxcolor=black@0.5:boxborderw=5,drawtext=text='Welcome to BDStreamHub - Watch Live Movies and Entertainment Non-Stop!':x=w-mod(max(t\\,0)*100\\,w+tw):y=h-40:fontsize=24:fontcolor=yellow:box=1:boxcolor=black@0.7:boxborderw=8",
+    '-vf', "scale=1280:-2,drawtext=text='BDStreamHub TV':x=w-tw-20:y=20:fontsize=24:fontcolor=white:box=1:boxcolor=black@0.5:boxborderw=4,drawtext=text='Welcome to BDStreamHub - Watch Live Movies and Entertainment Non-Stop!':x=w-mod(max(t\\,0)*80\\,w+tw):y=h-35:fontsize=18:fontcolor=yellow:box=1:boxcolor=black@0.6:boxborderw=6",
     '-c:v', 'libx264',
     '-preset', 'ultrafast',
-    '-b:v', '1500k',
-    '-maxrate', '1600k',
-    '-bufsize', '3000k',
+    '-tune', 'zerolatency',
+    '-b:v', '1000k',
+    '-maxrate', '1200k',
+    '-bufsize', '2400k',
     '-c:a', 'aac',
-    '-b:a', '128k',
-    '-ar', '44100',
+    '-b:a', '96k',
     '-f', 'hls',
-    '-hls_time', '4',
-    '-hls_list_size', '6',
-    '-hls_flags', 'delete_segments',
+    '-hls_time', '3',
+    '-hls_list_size', '8',
+    '-hls_flags', 'delete_segments+split_by_time',
     path.join(liveDir, 'stream.m3u8')
   ];
 
   const ffmpegProcess = spawn('ffmpeg', ffmpegArgs);
 
-  ffmpegProcess.stderr.on('data', (data) => {
-    // লগ ট্র্যাক (প্রয়োজন হলে দেখতে পারেন)
-  });
-
   ffmpegProcess.on('close', (code) => {
-    console.log(`FFmpeg stopped with code ${code}, restarting...`);
+    console.log(`Stream exited with code ${code}. Auto-restarting in 2s...`);
     setTimeout(startStream, 2000);
   });
 }
 
-// সার্ভার চালু ও স্ট্রিম শুরু
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
   startStream();
