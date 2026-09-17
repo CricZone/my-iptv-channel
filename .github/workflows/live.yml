@@ -1,0 +1,22 @@
+name: 24/7 Live Streamer
+
+on:
+  schedule:
+    - cron: '0 */5 * * *' # প্রতি ৫ ঘণ্টা পর পর অটো রিস্টার্ট
+  workflow_dispatch:
+
+jobs:
+  stream:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Start Non-Stop Streaming
+        run: |
+          chmod +x stream.sh
+          ./stream.sh &
+          sleep 18000 # ৫ ঘণ্টা ব্যাকগ্রাউন্ডে স্ট্রিম চলবে
