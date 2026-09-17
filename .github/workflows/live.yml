@@ -11,31 +11,42 @@ permissions:
 jobs:
   stream:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Install FFmpeg & yt-dlp
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg
-          sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
-          sudo chmod a+rx /usr/local/bin/yt-dlp
+      - name: Install FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
 
-      - name: Stream Directly From YouTube (Bypass Block)
+      - name: Fetch YouTube Stream via Invidious & Render
         run: |
           mkdir -p live
           
-          # playlist.txt থেকে প্রথম ইউটিউব লিঙ্ক নেওয়া
-          YT_URL=$(head -n 1 playlist.txt)
+          RAW_URL=$(head -n 1 playlist.txt | tr -d '\r\n ')
           
-          # অ্যান্ড্রয়েড ক্লায়েন্ট দিয়ে ইউটিউব ব্লক বাইপাস করে সরাসরি পাইপ স্ট্রিম
-          yt-dlp --extractor-args "youtube:player_client=android" -f "best[ext=mp4]/best" -o - "$YT_URL" | \
-          timeout 50s ffmpeg -re -i pipe:0 \
+          # ইউটিউব ভিডিও আইডি বের করা
+          if [[ "$RAW_URL" =~ (youtu\.be\/|v=|\/embed\/|\/shorts\/)([a-zA-Z0-9_-]{11}) ]]; then
+            VIDEO_ID="${BASH_REMATCH[2]}"
+          else
+            VIDEO_ID="$RAW_URL"
+          fi
+          
+          echo "Processing YouTube Video ID: $VIDEO_ID"
+
+          # ব্লকহীন ফ্রি পাবলিক ইনভিডিয়াস API থেকে ডাইরেক্ট স্ট্রিম লিংক নেওয়া
+          STREAM_URL=$(curl -s "https://inv.tux.pizza/api/v1/videos/$VIDEO_ID" | grep -oP '"url":"\Khttps:[^"]+' | grep "googlevideo.com" | head -n 1 | sed 's/\\u0026/\&/g')
+          
+          # ব্যাকআপ প্রক্সি যদি প্রথমটি কাজ না করে
+          if [ -z "$STREAM_URL" ]; then
+            STREAM_URL="https://pipedproxy.kavin.rocks/videoplayback?id=$VIDEO_ID"
+          fi
+
+          # সরাসরি FFmpeg-এ স্ট্রিম পাঠিয়ে লাইভ তৈরি
+          timeout 50s ffmpeg -re -i "$STREAM_URL" \
           -vf "drawtext=text='BDStreamHub TV':x=w-tw-30:y=30:fontsize=32:fontcolor=white:box=1:boxcolor=black@0.5:boxborderw=5, \
           drawtext=text='Welcome to BDStreamHub - Watch Live YouTube Streams Non-Stop!':x=w-mod(max(t\,0)*100\,w+tw):y=h-40:fontsize=24:fontcolor=yellow:box=1:boxcolor=black@0.7:boxborderw=8" \
-          -c:v libx264 -preset veryfast -b:v 2000k -maxrate 2200k -bufsize 4000k \
+          -c:v libx264 -preset veryfast -b:v 1800k \
           -c:a aac -b:a 128k \
           -f hls -hls_time 6 -hls_list_size 10 -hls_flags delete_segments live/stream.m3u8 || true
 
