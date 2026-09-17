@@ -16,15 +16,18 @@ jobs:
       - name: Install FFmpeg
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
 
-      - name: Hardcode Logo & Scrollbar Permanently
+      - name: Fast Download and Bake Video
         run: |
           mkdir -p video
           VIDEO_URL=$(head -n 1 playlist.txt | tr -d '\r\n ')
           
-          # পুরো ভিডিওতে স্থায়ীভাবে লোগো ও টেক্সট যুক্ত করে একটি পারফেক্ট mp4 তৈরি
-          ffmpeg -i "$VIDEO_URL" \
+          # ১. আগে পুরো ভিডিও লোকাল ডিস্কে ৩ সেকেন্ডে নামিয়ে নেওয়া
+          curl -L -o raw_video.mp4 "$VIDEO_URL"
+          
+          # ২. লোকাল ফাইল থেকে আল্ট্রাফাস্ট স্পিডে লোগো ও স্ক্রোলিং যুক্ত করা
+          ffmpeg -i raw_video.mp4 \
           -vf "drawtext=text='BDStreamHub TV':x=w-tw-30:y=30:fontsize=32:fontcolor=white:box=1:boxcolor=black@0.5:boxborderw=5,drawtext=text='Welcome to BDStreamHub - Watch Live Movies and Entertainment Non-Stop!':x=w-mod(max(t\,0)*100\,w+tw):y=h-40:fontsize=24:fontcolor=yellow:box=1:boxcolor=black@0.7:boxborderw=8" \
-          -c:v libx264 -preset fast -crf 22 \
+          -c:v libx264 -preset ultrafast -crf 22 \
           -c:a aac -b:a 128k \
           video/branded.mp4
 
