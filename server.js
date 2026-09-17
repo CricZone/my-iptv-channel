@@ -14,7 +14,7 @@ if (!fs.existsSync(liveDir)) {
   fs.mkdirSync(liveDir, { recursive: true });
 }
 
-// জিরো বাফার ও ফাস্ট লোডিং হেডার
+// সুপার-ফাস্ট ক্যাশিং ও বাফারলেস হেডার
 app.use('/live', express.static(liveDir, {
   setHeaders: (res, filePath) => {
     res.set('Access-Control-Allow-Origin', '*');
@@ -29,15 +29,13 @@ app.use('/live', express.static(liveDir, {
 }));
 
 app.get('/', (req, res) => {
-  res.send('BDStreamHub Multi-Source Live Server Running Smoothly!');
+  res.send('BDStreamHub Zero-Buffer Live Server Active!');
 });
 
-// গুগল ড্রাইভ HD কনফার্মেশন ও ডাইরেক্ট লিঙ্ক হ্যান্ডলার
 function parseDirectUrl(url) {
   if (url.includes('drive.google.com')) {
     const match = url.match(/\/d\/([a-zA-Z0-9_-]+)/) || url.match(/id=([a-zA-Z0-9_-]+)/);
     if (match && match[1]) {
-      // বড় ফাইলের ক্ষেত্রে গুগল ড্রাইভ ভাইরাস স্ক্যান পেজ বাইপাস করে সরাসরি HD ফাইল আনা
       return `https://drive.usercontent.google.com/download?id=${match[1]}&export=download&confirm=t`;
     }
   }
@@ -45,79 +43,82 @@ function parseDirectUrl(url) {
 }
 
 function startStream() {
+  const brandedLocalVideo = path.join(__dirname, 'video', 'branded.mp4');
   const playlistFile = path.join(__dirname, 'playlist.txt');
-  if (!fs.existsSync(playlistFile)) {
-    console.error('playlist.txt file not found!');
-    return;
+
+  let sourceUrl = '';
+  let isLocalBranded = false;
+
+  // ১. অগ্রাধিকার: রিপোজিটরির ভেতরে তৈরি হওয়া ব্র্যান্ডেড ভিডিও (০% বাফার)
+  if (fs.existsSync(brandedLocalVideo)) {
+    sourceUrl = brandedLocalVideo;
+    isLocalBranded = true;
+    console.log('Source: Local Branded Video detected (Zero CPU Mode)');
+  } else if (fs.existsSync(playlistFile)) {
+    const lines = fs.readFileSync(playlistFile, 'utf8')
+      .split('\n')
+      .map(l => l.trim())
+      .filter(Boolean);
+
+    if (lines.length > 0) {
+      sourceUrl = parseDirectUrl(lines[0]);
+      if (!sourceUrl.startsWith('http://') && !sourceUrl.startsWith('https://')) {
+        sourceUrl = path.join(__dirname, sourceUrl);
+      }
+    }
   }
 
-  const lines = fs.readFileSync(playlistFile, 'utf8')
-    .split('\n')
-    .map(l => l.trim())
-    .filter(Boolean);
-
-  if (lines.length === 0) {
-    console.error('playlist.txt is empty!');
+  if (!sourceUrl) {
+    console.error('No video source found! Retrying in 5 seconds...');
+    setTimeout(startStream, 5000);
     return;
-  }
-
-  let rawSource = lines[0];
-  let sourceUrl = parseDirectUrl(rawSource);
-  
-  // ফাইল যদি লোকাল গিটহাব রিপোজিটরির ভেতরে থাকে
-  if (!sourceUrl.startsWith('http://') && !sourceUrl.startsWith('https://')) {
-    sourceUrl = path.join(__dirname, sourceUrl);
   }
 
   console.log('Final Source Stream:', sourceUrl);
 
   let ffmpegArgs = [];
 
-  // ১. সোর্স যদি সরাসরি .m3u8 হয় (Zero CPU Relay - নো বাফারিং)
-  if (sourceUrl.includes('.m3u8')) {
-    console.log('Mode: Direct HLS Relay');
+  // ভিডিও যদি অলরেডি ব্র্যান্ডেড লোকাল ফাইল অথবা .m3u8 হয়:
+  // কোনো রিকোডিং হবে না, CPU ব্যবহার হবে ০%, ইনস্ট্যান্ট প্লেব্যাক
+  if (isLocalBranded || sourceUrl.includes('.m3u8')) {
     ffmpegArgs = [
       '-re',
-      '-headers', 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\n',
+      '-stream_loop', '-1',
       '-i', sourceUrl,
       '-c', 'copy',
       '-f', 'hls',
       '-hls_time', '2',
-      '-hls_list_size', '6',
+      '-hls_list_size', '5',
       '-hls_flags', 'delete_segments',
       path.join(liveDir, 'stream.m3u8')
     ];
   } 
-  // ২. সোর্স যদি Google Drive, Archive.org বা লোকাল MP4 হয়
+  // গুগল ড্রাইভ বা অন্য রিমোট সোর্সের ক্ষেত্রে লাইটওয়েট হ্যান্ডলিং (নো হেভি ফিল্টার)
   else {
-    console.log('Mode: Optimized Dynamic Stream');
     ffmpegArgs = [
       '-re',
       '-stream_loop', '-1',
       '-user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
       '-i', sourceUrl,
-      '-vf', "scale=1280:-2,drawtext=text='BDStreamHub TV':x=w-tw-25:y=25:fontsize=28:fontcolor=white:box=1:boxcolor=black@0.5:boxborderw=4,drawtext=text='* WELCOME TO BDSTREAMHUB * 24/7 LIVE TV STREAMING * WATCH LIVE TV CHANNELS * ENJOY LIVE SPORTS INCLUDING FOOTBALL & CRICKET * WATCH MOVIES, SHOWS & ENTERTAINMENT * DOWNLOAD THE BDSTREAMHUB APP * SEARCH BDSTREAMHUB ON GOOGLE * TELEGRAM @bdstreamhub00 * NEW CHANNELS & REGULAR UPDATES AVAILABLE * STAY CONNECTED WITH BDSTREAMHUB *':x=w-mod(max(t\\,0)*80\\,w+tw):y=h-35:fontsize=18:fontcolor=yellow:box=1:boxcolor=black@0.6:boxborderw=5",
       '-c:v', 'libx264',
       '-preset', 'ultrafast',
       '-tune', 'zerolatency',
-      '-b:v', '1200k',
-      '-maxrate', '1500k',
-      '-bufsize', '2500k',
+      '-b:v', '800k',
+      '-maxrate', '1000k',
+      '-bufsize', '1500k',
       '-c:a', 'aac',
-      '-b:a', '96k',
+      '-b:a', '64k',
       '-f', 'hls',
-      '-hls_time', '3',
-      '-hls_list_size', '8',
-      '-hls_flags', 'delete_segments+split_by_time',
+      '-hls_time', '2',
+      '-hls_list_size', '5',
+      '-hls_flags', 'delete_segments',
       path.join(liveDir, 'stream.m3u8')
     ];
   }
 
   const ffmpegProcess = spawn('ffmpeg', ffmpegArgs);
 
-  ffmpegProcess.stderr.on('data', (data) => {
-    // FFmpeg লগের জন্য এটি সাইলেন্ট রাখা হয়েছে
-  });
+  ffmpegProcess.stderr.on('data', () => {});
 
   ffmpegProcess.on('close', (code) => {
     console.log(`Stream stopped (${code}). Auto-restarting in 2s...`);
