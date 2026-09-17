@@ -32,12 +32,13 @@ app.get('/', (req, res) => {
   res.send('BDStreamHub Multi-Source Live Server Running Smoothly!');
 });
 
+// গুগল ড্রাইভ HD কনফার্মেশন ও ডাইরেক্ট লিঙ্ক হ্যান্ডলার
 function parseDirectUrl(url) {
-  // গুগল ড্রাইভ ভিউ লিংক স্বয়ংক্রিয়ভাবে ডাইরেক্ট স্ট্রিমে কনভার্ট করা
   if (url.includes('drive.google.com')) {
     const match = url.match(/\/d\/([a-zA-Z0-9_-]+)/) || url.match(/id=([a-zA-Z0-9_-]+)/);
     if (match && match[1]) {
-      return `https://drive.google.com/uc?export=download&id=${match[1]}`;
+      // বড় ফাইলের ক্ষেত্রে গুগল ড্রাইভ ভাইরাস স্ক্যান পেজ বাইপাস করে সরাসরি HD ফাইল আনা
+      return `https://drive.usercontent.google.com/download?id=${match[1]}&export=download&confirm=t`;
     }
   }
   return url;
@@ -60,8 +61,15 @@ function startStream() {
     return;
   }
 
-  let sourceUrl = parseDirectUrl(lines[0]);
-  console.log('Detected Source:', sourceUrl);
+  let rawSource = lines[0];
+  let sourceUrl = parseDirectUrl(rawSource);
+  
+  // ফাইল যদি লোকাল গিটহাব রিপোজিটরির ভেতরে থাকে
+  if (!sourceUrl.startsWith('http://') && !sourceUrl.startsWith('https://')) {
+    sourceUrl = path.join(__dirname, sourceUrl);
+  }
+
+  console.log('Final Source Stream:', sourceUrl);
 
   let ffmpegArgs = [];
 
@@ -80,7 +88,7 @@ function startStream() {
       path.join(liveDir, 'stream.m3u8')
     ];
   } 
-  // ২. সোর্স যদি Google Drive, Archive.org বা যেকোনো MP4 হয়
+  // ২. সোর্স যদি Google Drive, Archive.org বা লোকাল MP4 হয়
   else {
     console.log('Mode: Optimized Dynamic Stream');
     ffmpegArgs = [
@@ -92,11 +100,11 @@ function startStream() {
       '-c:v', 'libx264',
       '-preset', 'ultrafast',
       '-tune', 'zerolatency',
-      '-b:v', '900k',
-      '-maxrate', '1100k',
-      '-bufsize', '2000k',
+      '-b:v', '1200k',
+      '-maxrate', '1500k',
+      '-bufsize', '2500k',
       '-c:a', 'aac',
-      '-b:a', '64k',
+      '-b:a', '96k',
       '-f', 'hls',
       '-hls_time', '3',
       '-hls_list_size', '8',
@@ -108,7 +116,7 @@ function startStream() {
   const ffmpegProcess = spawn('ffmpeg', ffmpegArgs);
 
   ffmpegProcess.stderr.on('data', (data) => {
-    // প্রয়োজন হলে লগ দেখতে পারেন
+    // FFmpeg লগের জন্য এটি সাইলেন্ট রাখা হয়েছে
   });
 
   ffmpegProcess.on('close', (code) => {
