@@ -24,13 +24,14 @@ jobs:
           sudo apt-get install -y ffmpeg python3-pip
           sudo pip3 install --break-system-packages -U yt-dlp
 
-      - name: Download HD Video
+      - name: Download HD Video (Bypass Bot Check)
         run: |
           mkdir -p videos
-          # ইউটিউব বট বাইপাস ও 720p/HD কমপ্যাক্ট ডাউনলোড
-          yt-dlp --extractor-args "youtube:player_client=android" \
-            -f "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best" \
-            --merge-output-format mp4 \
+          # iOS ও Mobile Web ক্লায়েন্ট দিয়ে ইউটিউব বট ব্লক বাইপাস
+          yt-dlp \
+            --extractor-args "youtube:player_client=ios,mweb" \
+            -f "best[ext=mp4]/best" \
+            --no-check-certificates \
             -o "videos/stream.mp4" "${{ inputs.youtube_url }}"
 
       - name: Update Playlist
@@ -41,7 +42,6 @@ jobs:
         run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-          git pull origin main --rebase
           git add videos/stream.mp4 playlist.txt
           git commit -m "Auto updated video from YouTube" || echo "No changes"
           git push origin main
