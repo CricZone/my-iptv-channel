@@ -20,22 +20,28 @@ jobs:
       - name: Install FFmpeg
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
 
-      - name: Process Video with Logo and Scroll Text
+      - name: Process Full Video HD with Logo & Scroll
         run: |
           mkdir -p live
           VIDEO_URL=$(head -n 1 playlist.txt)
-          ffmpeg -re -stream_loop -1 -i "$VIDEO_URL" \
-          -vf "drawtext=text='BDStreamHub TV':x=w-tw-30:y=30:fontsize=32:fontcolor=white:box=1:boxcolor=black@0.5:boxborderw=5, \
-          drawtext=text='Welcome to BDStreamHub - Watch Live Sports, Movies and Entertainment Non-Stop!':x=w-mod(max(t\,0)*120\,w+tw):y=h-40:fontsize=24:fontcolor=yellow:box=1:boxcolor=black@0.7:boxborderw=8" \
-          -c:v libx264 -preset veryfast -b:v 1500k -maxrate 1800k -bufsize 3000k \
-          -c:a aac -b:a 128k -ar 44100 \
-          -f hls -hls_time 4 -hls_list_size 10 -hls_flags delete_segments live/stream.m3u8 &
-          sleep 120
+          
+          # মূল ভিডিও নামিয়ে নেওয়া
+          curl -L -o input.mp4 "$VIDEO_URL"
 
-      - name: Commit and Push Stream
+          # ক্রিস্টাল ক্লিয়ার কোয়ালিটি (CRF 20) এবং সম্পূর্ণ ভিডিও HLS ফরম্যাটে রেন্ডার
+          ffmpeg -i input.mp4 \
+          -vf "drawtext=text='BDStreamHub TV':x=w-tw-30:y=30:fontsize=32:fontcolor=white:box=1:boxcolor=black@0.5:boxborderw=5, \
+          drawtext=text='Welcome to BDStreamHub - Watch Live Sports, Movies and Entertainment Non-Stop!':x=w-mod(max(t\,0)*100\,w+tw):y=h-40:fontsize=24:fontcolor=yellow:box=1:boxcolor=black@0.7:boxborderw=8" \
+          -c:v libx264 -preset medium -crf 20 \
+          -c:a aac -b:a 192k \
+          -hls_time 6 \
+          -hls_playlist_type event \
+          live/stream.m3u8
+
+      - name: Commit and Push Full Stream
         run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
           git add live/
-          git commit -m "Update live stream segments" || echo "No changes"
+          git commit -m "Update full crystal clear stream" || echo "No changes"
           git push
