@@ -20,25 +20,23 @@ jobs:
 
       - name: Download and Process Video (Compressed & HD)
         run: |
-          mkdir -p video
           VIDEO_URL=$(head -n 1 playlist.txt | tr -d '\r\n ')
 
           # ভিডিও ডাউনলোড
           curl -H "User-Agent: Mozilla/5.0" -L -o raw_video.mp4 "$VIDEO_URL"
 
-          # 720p স্কেলিং ও অপ্টিমাইজড বিটরেট (ফাইল সাইজ হবে মাত্র ~২৫ MB, ১০০% ক্লিয়ার)
+          # 720p স্কেলিং ও ব্র্যান্ডিং
           ffmpeg -y -i raw_video.mp4 \
           -vf "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:text='BDStreamHub TV':x=w-tw-30:y=30:fontsize=32:fontcolor=white:box=1:boxcolor=black@0.5:boxborderw=5,drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:text='Welcome to BDStreamHub - Watch Live Movies and Entertainment Non-Stop!':x=w-mod(max(t\,0)*100\,w+tw):y=h-40:fontsize=24:fontcolor=yellow:box=1:boxcolor=black@0.7:boxborderw=8" \
           -c:v libx264 -preset veryfast -b:v 1500k -maxrate 1800k -bufsize 3000k \
           -c:a aac -b:a 128k \
-          video/branded.mp4
+          branded.mp4
 
-      - name: Commit and Push
+      - name: Upload to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          git config --global user.name 'github-actions[bot]'
-          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-          rm -f raw_video.mp4
-          git add -f video/branded.mp4
-          git commit -m "Add optimized branded video" || echo "No changes"
-          git pull --rebase origin main -X ours
-          git push origin main
+          gh release delete live --yes || echo "No previous release"
+          git tag -d live || echo "No local tag"
+          git push --delete origin live || echo "No remote tag"
+          gh release create live branded.mp4 --title "Live Video Stream" --notes "Latest branded stream source"
