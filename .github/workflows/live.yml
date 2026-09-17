@@ -7,8 +7,6 @@ on:
 
 permissions:
   contents: write
-  pages: write
-  id-token: write
 
 jobs:
   stream:
@@ -20,28 +18,28 @@ jobs:
       - name: Install FFmpeg
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
 
-      - name: Process Full Video HD with Logo & Scroll
+      - name: Stream Full Movies Playlist Non-Stop
         run: |
           mkdir -p live
-          VIDEO_URL=$(head -n 1 playlist.txt)
           
-          # মূল ভিডিও নামিয়ে নেওয়া
-          curl -L -o input.mp4 "$VIDEO_URL"
-
-          # ক্রিস্টাল ক্লিয়ার কোয়ালিটি (CRF 20) এবং সম্পূর্ণ ভিডিও HLS ফরম্যাটে রেন্ডার
-          ffmpeg -i input.mp4 \
+          # playlist.txt থেকে ffmpeg এর জন্য ফরমেট তৈরি
+          sed 's/^/file '\''/' playlist.txt | sed 's/$/'\'''/ > files.txt
+          
+          # বড় মুভি সরাসরি লিঙ্ক থেকে স্ট্রিম করা (মেমোরি সেভ মেথড)
+          ffmpeg -re -stream_loop -1 -f concat -safe 0 -protocol_whitelist file,http,https,tcp,tls -i files.txt \
           -vf "drawtext=text='BDStreamHub TV':x=w-tw-30:y=30:fontsize=32:fontcolor=white:box=1:boxcolor=black@0.5:boxborderw=5, \
-          drawtext=text='Welcome to BDStreamHub - Watch Live Sports, Movies and Entertainment Non-Stop!':x=w-mod(max(t\,0)*100\,w+tw):y=h-40:fontsize=24:fontcolor=yellow:box=1:boxcolor=black@0.7:boxborderw=8" \
-          -c:v libx264 -preset medium -crf 20 \
-          -c:a aac -b:a 192k \
-          -hls_time 6 \
-          -hls_playlist_type event \
-          live/stream.m3u8
+          drawtext=text='Welcome to BDStreamHub - Watch Live Movies and Entertainment Non-Stop!':x=w-mod(max(t\,0)*100\,w+tw):y=h-40:fontsize=24:fontcolor=yellow:box=1:boxcolor=black@0.7:boxborderw=8" \
+          -c:v libx264 -preset veryfast -b:v 2000k -maxrate 2200k -bufsize 4000k \
+          -c:a aac -b:a 128k \
+          -f hls -hls_time 6 -hls_list_size 10 -hls_flags delete_segments live/stream.m3u8 &
+          
+          # প্রথম কয়েক সেগমেন্ট তৈরি হওয়ার জন্য অপেক্ষা
+          sleep 45
 
-      - name: Commit and Push Full Stream
+      - name: Commit and Push Stream
         run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
           git add live/
-          git commit -m "Update full crystal clear stream" || echo "No changes"
+          git commit -m "Live Movie Stream Active" || echo "No changes"
           git push
