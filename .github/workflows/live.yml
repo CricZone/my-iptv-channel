@@ -37,7 +37,8 @@ jobs:
         run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-          git pull origin main --rebase
-          git add video/branded.mp4
+          rm -f raw_video.mp4
+          git add -f video/branded.mp4
           git commit -m "Add optimized branded video" || echo "No changes"
-          git push
+          git pull --rebase origin main -X ours
+          git push origin main
