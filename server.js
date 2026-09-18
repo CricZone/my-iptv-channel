@@ -14,7 +14,7 @@ if (!fs.existsSync(liveDir)) {
   fs.mkdirSync(liveDir, { recursive: true });
 }
 
-// সুপার-ফাস্ট নো-বাফার হেডার
+// সুপার-ফাস্ট নো-বাফার HLS হেডার
 app.use('/live', express.static(liveDir, {
   setHeaders: (res, filePath) => {
     res.set('Access-Control-Allow-Origin', '*');
@@ -22,17 +22,17 @@ app.use('/live', express.static(liveDir, {
       res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
       res.set('Content-Type', 'application/vnd.apple.mpegurl');
     } else if (filePath.endsWith('.ts')) {
-      res.set('Cache-Control', 'public, max-age=60');
+      res.set('Cache-Control', 'public, max-age=10');
       res.set('Content-Type', 'video/mp2t');
     }
   }
 }));
 
 app.get('/', (req, res) => {
-  res.send('BDStreamHub Sequential Live Streaming Running!');
+  res.send('BDStreamHub Non-Stop 24/7 Live Streaming Running!');
 });
 
-// গুগল ড্রাইভ ডাইরেক্ট স্ট্রিম কনভার্টার
+// গুগল ড্রাইভ ডাইরেক্ট লিংক কনভার্টার
 function parseDirectUrl(url) {
   if (url.includes('drive.google.com')) {
     const match = url.match(/\/d\/([a-zA-Z0-9_-]+)/) || url.match(/id=([a-zA-Z0-9_-]+)/);
@@ -43,8 +43,8 @@ function parseDirectUrl(url) {
   return url;
 }
 
-// ভিডিও ট্র্যাকার ইন্ডেক্স
 let currentIndex = 0;
+let ffmpegProcess = null;
 
 function startStream() {
   const playlistFile = path.join(__dirname, 'playlist.txt');
@@ -54,7 +54,6 @@ function startStream() {
     return;
   }
 
-  // প্রতিবার নতুন করে ফাইল পড়ে যাতে নতুন লিংক যোগ করলে রিস্টার্ট ছাড়া পেয়ে যায়
   const lines = fs.readFileSync(playlistFile, 'utf8')
     .split('\n')
     .map(l => l.trim())
@@ -66,42 +65,47 @@ function startStream() {
     return;
   }
 
-  // সব ভিডিও শেষ হলে স্বয়ংক্রিয়ভাবে আবার ১ নম্বর ভিডিওতে ব্যাক করবে
   if (currentIndex >= lines.length) {
     currentIndex = 0;
   }
 
   const rawUrl = lines[currentIndex];
   const sourceUrl = parseDirectUrl(rawUrl);
-  console.log(`[Playing Video ${currentIndex + 1} of ${lines.length}]: ${sourceUrl}`);
+  console.log(`[Playing Video ${currentIndex + 1}/${lines.length}]: ${rawUrl}`);
 
-  // -c copy মোডে ০% সিপিইউ লোডে ধারাবাহিক প্লেলিস্ট তৈরি
+  // নন-স্টপ ও স্মুথ ট্রানজিশনের জন্য অপ্টিমাইজড আর্গুমেন্ট
   const ffmpegArgs = [
     '-re',
     '-user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+    '-reconnect', '1',
+    '-reconnect_at_eof', '1',
+    '-reconnect_streamed', '1',
+    '-reconnect_delay_max', '5',
     '-i', sourceUrl,
     '-c', 'copy',
     '-f', 'hls',
-    '-hls_time', '3',
-    '-hls_list_size', '6',
-    '-hls_flags', 'delete_segments+append_list',
+    '-hls_time', '4',
+    '-hls_list_size', '5',
+    '-hls_flags', 'delete_segments+append_list+discont_start',
     path.join(liveDir, 'stream.m3u8')
   ];
 
-  const ffmpegProcess = spawn('ffmpeg', ffmpegArgs);
+  ffmpegProcess = spawn('ffmpeg', ffmpegArgs);
 
-  ffmpegProcess.stderr.on('data', () => {});
+  ffmpegProcess.stderr.on('data', (data) => {
+    // console.log(data.toString()); // ডিবাগিং এর জন্য প্রয়োজন হলে অন করতে পারেন
+  });
 
   ffmpegProcess.on('close', (code) => {
-    console.log(`Video ${currentIndex + 1} finished (${code}). Next video starting...`);
-    currentIndex++; // পরবর্তী ভিডিওর ইন্ডেক্স
-    setTimeout(startStream, 1000);
+    console.log(`Video ${currentIndex + 1} ended. Loading next video immediately...`);
+    currentIndex = (currentIndex + 1) % lines.length; // স্বয়ংক্রিয় নেক্সট লুপ
+    setTimeout(startStream, 300); // গ্যাপ ০ সেকেন্ডে নামিয়ে আনা
   });
 
   ffmpegProcess.on('error', (err) => {
-    console.error('FFmpeg process error:', err.message);
-    currentIndex++;
-    setTimeout(startStream, 2000);
+    console.error('FFmpeg error:', err.message);
+    currentIndex = (currentIndex + 1) % lines.length;
+    setTimeout(startStream, 1000);
   });
 }
 
