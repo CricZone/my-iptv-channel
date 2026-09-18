@@ -3,6 +3,7 @@ const cors = require('cors');
 const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const https = require('https');
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -10,11 +11,12 @@ const PORT = process.env.PORT || 10000;
 app.use(cors());
 
 const liveDir = path.join(__dirname, 'live');
-if (!fs.existsSync(liveDir)) {
-  fs.mkdirSync(liveDir, { recursive: true });
-}
+const cacheDir = path.join(__dirname, 'cache');
 
-// সুপার-ফাস্ট নো-বাফার HLS হেডার
+if (!fs.existsSync(liveDir)) fs.mkdirSync(liveDir, { recursive: true });
+if (!fs.existsSync(cacheDir)) fs.mkdirSync(cacheDir, { recursive: true });
+
+// HLS হেডার (নো বাফার)
 app.use('/live', express.static(liveDir, {
   setHeaders: (res, filePath) => {
     res.set('Access-Control-Allow-Origin', '*');
@@ -29,28 +31,39 @@ app.use('/live', express.static(liveDir, {
 }));
 
 app.get('/', (req, res) => {
-  res.send('BDStreamHub Non-Stop 24/7 Live Streaming Running!');
+  res.send('BDStreamHub 24/7 TV Running Smoothly!');
 });
 
-// গুগল ড্রাইভ ডাইরেক্ট লিংক কনভার্টার
-function parseDirectUrl(url) {
-  if (url.includes('drive.google.com')) {
-    const match = url.match(/\/d\/([a-zA-Z0-9_-]+)/) || url.match(/id=([a-zA-Z0-9_-]+)/);
-    if (match && match[1]) {
-      return `https://drive.usercontent.google.com/download?id=${match[1]}&export=download&confirm=t`;
+// সরাসরি ডাউনলোড ফাংশন (যা ড্রাইভের বাফারিং ব্লক পুরোপুরি দূর করে)
+function downloadVideo(url, targetPath) {
+  return new Promise((resolve, reject) => {
+    if (fs.existsSync(targetPath) && fs.statSync(targetPath).size > 1000000) {
+      return resolve(targetPath);
     }
-  }
-  return url;
+    const file = fs.createWriteStream(targetPath);
+    https.get(url, (response) => {
+      if (response.statusCode === 302 || response.statusCode === 303 || response.statusCode === 307) {
+        return downloadVideo(response.headers.location, targetPath).then(resolve).catch(reject);
+      }
+      response.pipe(file);
+      file.on('finish', () => {
+        file.close(() => resolve(targetPath));
+      });
+    }).on('error', (err) => {
+      fs.unlink(targetPath, () => {});
+      reject(err);
+    });
+  });
 }
 
 let currentIndex = 0;
 let ffmpegProcess = null;
 
-function startStream() {
+async function playNextStream() {
   const playlistFile = path.join(__dirname, 'playlist.txt');
   if (!fs.existsSync(playlistFile)) {
     console.error('playlist.txt file not found!');
-    setTimeout(startStream, 5000);
+    setTimeout(playNextStream, 5000);
     return;
   }
 
@@ -61,7 +74,7 @@ function startStream() {
 
   if (lines.length === 0) {
     console.error('playlist.txt is empty!');
-    setTimeout(startStream, 5000);
+    setTimeout(playNextStream, 5000);
     return;
   }
 
@@ -69,47 +82,47 @@ function startStream() {
     currentIndex = 0;
   }
 
-  const rawUrl = lines[currentIndex];
-  const sourceUrl = parseDirectUrl(rawUrl);
-  console.log(`[Playing Video ${currentIndex + 1}/${lines.length}]: ${rawUrl}`);
+  const currentUrl = lines[currentIndex];
+  const nextIndex = (currentIndex + 1) % lines.length;
+  const nextUrl = lines[nextIndex];
 
-  // নন-স্টপ ও স্মুথ ট্রানজিশনের জন্য অপ্টিমাইজড আর্গুমেন্ট
+  console.log(`[Streaming Video ${currentIndex + 1}/${lines.length}]`);
+
+  // গুগল ড্রাইভ লিঙ্কটি রিকানেক্ট মোডে লাইভ স্ট্রিম করা
   const ffmpegArgs = [
     '-re',
     '-user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
     '-reconnect', '1',
     '-reconnect_at_eof', '1',
     '-reconnect_streamed', '1',
-    '-reconnect_delay_max', '5',
-    '-i', sourceUrl,
+    '-reconnect_delay_max', '2',
+    '-i', currentUrl,
     '-c', 'copy',
     '-f', 'hls',
-    '-hls_time', '4',
-    '-hls_list_size', '5',
+    '-hls_time', '3',
+    '-hls_list_size', '6',
     '-hls_flags', 'delete_segments+append_list+discont_start',
     path.join(liveDir, 'stream.m3u8')
   ];
 
   ffmpegProcess = spawn('ffmpeg', ffmpegArgs);
 
-  ffmpegProcess.stderr.on('data', (data) => {
-    // console.log(data.toString()); // ডিবাগিং এর জন্য প্রয়োজন হলে অন করতে পারেন
-  });
+  ffmpegProcess.stderr.on('data', () => {});
 
   ffmpegProcess.on('close', (code) => {
-    console.log(`Video ${currentIndex + 1} ended. Loading next video immediately...`);
-    currentIndex = (currentIndex + 1) % lines.length; // স্বয়ংক্রিয় নেক্সট লুপ
-    setTimeout(startStream, 300); // গ্যাপ ০ সেকেন্ডে নামিয়ে আনা
+    console.log(`Video ${currentIndex + 1} finished. Moving directly to Video ${nextIndex + 1}...`);
+    currentIndex = nextIndex;
+    setTimeout(playNextStream, 100);
   });
 
   ffmpegProcess.on('error', (err) => {
     console.error('FFmpeg error:', err.message);
-    currentIndex = (currentIndex + 1) % lines.length;
-    setTimeout(startStream, 1000);
+    currentIndex = nextIndex;
+    setTimeout(playNextStream, 1000);
   });
 }
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
-  startStream();
+  playNextStream();
 });
