@@ -15,7 +15,7 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Install FFmpeg
+      - name: Install FFmpeg & Tools
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg curl
@@ -30,18 +30,42 @@ jobs:
             exit 1
           fi
 
-          VIDEO_URL=$(grep -v '^#' playlist.txt | grep -m 1 '^http')
-          echo "Processing URL: $VIDEO_URL"
+          RAW_URL=$(grep -v '^#' playlist.txt | grep -m 1 '^http')
+          echo "Original URL: $RAW_URL"
 
-          # গুগল ড্রাইভ ফাইল লোকাল মেশিনে নিশ্চিত নামানো
-          curl -s -L -A "Mozilla/5.0" "$VIDEO_URL" -o temp_video.mp4
+          # লিঙ্ক থেকে ফাইল আইডি আলাদা করা
+          FILE_ID=$(echo "$RAW_URL" | grep -oP '(?<=id=)[a-zA-Z0-9_-]+|(?<=/d/)[a-zA-Z0-9_-]+' | head -n 1)
+          echo "Extracted File ID: $FILE_ID"
 
-          # যদি HTML বা খালি ফাইল আসে চেক করা
-          if [ ! -s temp_video.mp4 ]; then
-            echo "Failed to fetch video file from Drive link!"
+          if [ -z "$FILE_ID" ]; then
+            echo "Direct link download attempt..."
+            curl -s -L "$RAW_URL" -o temp_video.mp4
+          else
+            echo "Downloading with Google Drive Cookie Bypass..."
+            # গুগল ড্রাইভের ভাইরাস স্ক্যান ওয়ার্নিং বাইপাস লজিক
+            curl -c ./cookie.txt -s -L "https://drive.google.com/uc?export=download&id=${FILE_ID}" > /dev/null
+            CONFIRM_CODE=$(grep -oP 'download_warning_[0-9A-Za-z_]+' ./cookie.txt | head -n 1)
+            
+            if [ -n "$CONFIRM_CODE" ]; then
+              CONFIRM_VAL=$(grep "$CONFIRM_CODE" ./cookie.txt | awk '{print $NF}')
+              curl -Lb ./cookie.txt "https://drive.google.com/uc?export=download&confirm=${CONFIRM_VAL}&id=${FILE_ID}" -o temp_video.mp4
+            else
+              curl -Lb ./cookie.txt "https://drive.usercontent.google.com/download?id=${FILE_ID}&export=download&confirm=t" -o temp_video.mp4
+            fi
+            rm -f ./cookie.txt
+          fi
+
+          # ডাউনলোড করা ফাইলটি আসল এমপিফোর ভিডিও কিনা ভ্যালিডেট করা
+          FILE_TYPE=$(file -b --mime-type temp_video.mp4)
+          echo "Downloaded file MIME type: $FILE_TYPE"
+
+          if [[ "$FILE_TYPE" != video/* ]]; then
+            echo "Error: Downloaded file is not a valid video! It is $FILE_TYPE (Probably Google HTML block)"
+            cat temp_video.mp4 | head -n 20
             exit 1
           fi
 
+          # HLS এনকোডিং
           ffmpeg -y \
             -i temp_video.mp4 \
             -c copy \
