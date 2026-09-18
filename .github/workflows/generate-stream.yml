@@ -1,12 +1,12 @@
 name: Generate Live HLS Stream
 
 on:
-  workflow_dispatch: # ম্যানুয়ালি রান করার বাটন চালু রাখবে
+  workflow_dispatch:
   schedule:
-    - cron: '*/30 * * * *' # প্রতি ৩০ মিনিট পরপর অটো রান হয়ে আপডেট রাখবে
+    - cron: '*/30 * * * *'
 
 permissions:
-  contents: write # গিটহাবে ফাইল পুশ করার পারমিশন
+  contents: write
 
 jobs:
   build-stream:
@@ -18,28 +18,32 @@ jobs:
       - name: Install FFmpeg
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y ffmpeg curl
 
       - name: Process Video and Generate Live Segments
         run: |
-          # পুরনো live ফোল্ডার মুছে একদম ফ্রেশ ডিরেক্টরি বানানো
           rm -rf live
           mkdir -p live
 
-          # playlist.txt চেক করা
           if [ ! -f "playlist.txt" ]; then
             echo "playlist.txt not found!"
             exit 1
           fi
 
-          # প্রথম কার্যকর লিংক নেওয়া
           VIDEO_URL=$(grep -v '^#' playlist.txt | grep -m 1 '^http')
           echo "Processing URL: $VIDEO_URL"
 
-          # FFmpeg দিয়ে ফ্রেশ HLS তৈরি
+          # গুগল ড্রাইভ ফাইল লোকাল মেশিনে নিশ্চিত নামানো
+          curl -s -L -A "Mozilla/5.0" "$VIDEO_URL" -o temp_video.mp4
+
+          # যদি HTML বা খালি ফাইল আসে চেক করা
+          if [ ! -s temp_video.mp4 ]; then
+            echo "Failed to fetch video file from Drive link!"
+            exit 1
+          fi
+
           ffmpeg -y \
-            -headers "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\n" \
-            -i "$VIDEO_URL" \
+            -i temp_video.mp4 \
             -c copy \
             -f hls \
             -hls_time 3 \
@@ -47,10 +51,12 @@ jobs:
             -hls_flags delete_segments+append_list+omit_endlist \
             live/stream.m3u8
 
+          rm -f temp_video.mp4
+
       - name: Commit and Push to Live Folder
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add live/
-          git commit -m "Auto Update fresh live stream [skip ci]" || echo "No changes to commit"
+          git commit -m "Update full crystal clear stream [skip ci]" || echo "No changes to commit"
           git push
