@@ -14,7 +14,18 @@ if (!fs.existsSync(liveDir)) {
   fs.mkdirSync(liveDir, { recursive: true });
 }
 
-// নো-বাফার হেডার
+// প্রতিবার স্ট্রিম শুরুর আগে পুরনো কোনো আবর্জনা/ক্যাশ থাকলে তা ডিলিট করা
+function clearOldCache() {
+  if (fs.existsSync(liveDir)) {
+    const files = fs.readdirSync(liveDir);
+    for (const file of files) {
+      try {
+        fs.unlinkSync(path.join(liveDir, file));
+      } catch (e) {}
+    }
+  }
+}
+
 app.use('/live', express.static(liveDir, {
   setHeaders: (res, filePath) => {
     res.set('Access-Control-Allow-Origin', '*');
@@ -22,17 +33,16 @@ app.use('/live', express.static(liveDir, {
       res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
       res.set('Content-Type', 'application/vnd.apple.mpegurl');
     } else if (filePath.endsWith('.ts')) {
-      res.set('Cache-Control', 'public, max-age=60');
+      res.set('Cache-Control', 'no-cache, no-store');
       res.set('Content-Type', 'video/mp2t');
     }
   }
 }));
 
 app.get('/', (req, res) => {
-  res.send('BDStreamHub Continuous Live Engine Running!');
+  res.send('BDStreamHub Non-Stop Engine Running!');
 });
 
-// গুগল ড্রাইভ ডাইরেক্ট লিঙ্ক কনভার্টার
 function parseDirectUrl(url) {
   if (url.includes('drive.google.com')) {
     const match = url.match(/\/d\/([a-zA-Z0-9_-]+)/) || url.match(/id=([a-zA-Z0-9_-]+)/);
@@ -51,7 +61,6 @@ function startStream() {
 
   const playlistFile = path.join(__dirname, 'playlist.txt');
   if (!fs.existsSync(playlistFile)) {
-    console.error('playlist.txt file not found!');
     setTimeout(startStream, 3000);
     return;
   }
@@ -62,7 +71,6 @@ function startStream() {
     .filter(Boolean);
 
   if (lines.length === 0) {
-    console.error('playlist.txt is empty!');
     setTimeout(startStream, 3000);
     return;
   }
@@ -73,11 +81,10 @@ function startStream() {
 
   const rawUrl = lines[currentIndex];
   const sourceUrl = parseDirectUrl(rawUrl);
-  console.log(`[Playing Video ${currentIndex + 1}/${lines.length}]: ${sourceUrl}`);
+  console.log(`[Playing ${currentIndex + 1}/${lines.length}]: ${sourceUrl}`);
 
   isStreaming = true;
 
-  // নিরবচ্ছিন্ন ধারাবাহিক স্ট্রিমিং ও ডিসকন্টিনিউইটি ট্যাগ হ্যান্ডলার
   const ffmpegArgs = [
     '-re',
     '-reconnect', '1',
@@ -87,8 +94,8 @@ function startStream() {
     '-i', sourceUrl,
     '-c', 'copy',
     '-f', 'hls',
-    '-hls_time', '4',
-    '-hls_list_size', '6',
+    '-hls_time', '3',
+    '-hls_list_size', '5',
     '-hls_flags', 'delete_segments+append_list+omit_endlist+discont_start',
     path.join(liveDir, 'stream.m3u8')
   ];
@@ -97,15 +104,13 @@ function startStream() {
 
   ffmpegProcess.stderr.on('data', () => {});
 
-  ffmpegProcess.on('close', (code) => {
-    console.log(`Video ${currentIndex + 1} finished (${code}). Next video starting instantly...`);
+  ffmpegProcess.on('close', () => {
     isStreaming = false;
     currentIndex = (currentIndex + 1) % lines.length;
-    setTimeout(startStream, 200); // মিলি-সেকেন্ডের ব্যবধানে নেক্সট ভিডিও লোড
+    setTimeout(startStream, 200);
   });
 
-  ffmpegProcess.on('error', (err) => {
-    console.error('FFmpeg process error:', err.message);
+  ffmpegProcess.on('error', () => {
     isStreaming = false;
     currentIndex = (currentIndex + 1) % lines.length;
     setTimeout(startStream, 1000);
@@ -113,6 +118,7 @@ function startStream() {
 }
 
 app.listen(PORT, () => {
+  clearOldCache(); // সার্ভার রান হতেই ডিরেক্টরি ফ্রেশ হবে
   console.log(`Server running on port ${PORT}`);
   startStream();
 });
