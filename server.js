@@ -11,13 +11,12 @@ app.use(cors());
 
 const liveDir = path.join(__dirname, 'live');
 
-// সার্ভার স্টার্টে পুরনো ভাঙা সেগমেন্ট ফাইল ক্লিয়ার
-if (fs.existsSync(liveDir)) {
-  fs.rmSync(liveDir, { recursive: true, force: true });
+// সার্ভার স্টার্টে ডিরেক্টরি ফ্রেশ করা
+if (!fs.existsSync(liveDir)) {
+  fs.mkdirSync(liveDir, { recursive: true });
 }
-fs.mkdirSync(liveDir, { recursive: true });
 
-// ব্রাউজার ও এক্সোপ্লেয়ারের জন্য স্ট্রং নো-ক্যাশ হেডার
+// সুপার-ফাস্ট স্ট্রং নো-ক্যাশ হেডার
 app.use('/live', express.static(liveDir, {
   setHeaders: (res, filePath) => {
     res.set('Access-Control-Allow-Origin', '*');
@@ -27,14 +26,14 @@ app.use('/live', express.static(liveDir, {
       res.set('Expires', '0');
       res.set('Content-Type', 'application/vnd.apple.mpegurl');
     } else if (filePath.endsWith('.ts')) {
-      res.set('Cache-Control', 'public, max-age=10');
+      res.set('Cache-Control', 'public, max-age=60');
       res.set('Content-Type', 'video/mp2t');
     }
   }
 }));
 
 app.get('/', (req, res) => {
-  res.send('BDStreamHub Non-Stop 24/7 Live Stream Running!');
+  res.send('BDStreamHub Non-Stop 24/7 Linear Live Running!');
 });
 
 function parseDirectUrl(url) {
@@ -53,14 +52,30 @@ function parseDirectUrl(url) {
 
 let currentIndex = 0;
 let isStreaming = false;
-let globalSequence = 0;
+
+// ডিস্কের আসল ফাইল থেকে নিখুঁত সেগমেন্ট কাউন্টার নির্ধারণ
+function getNextSequenceNumber() {
+  const m3u8Path = path.join(liveDir, 'stream.m3u8');
+  if (!fs.existsSync(m3u8Path)) return 0;
+
+  try {
+    const content = fs.readFileSync(m3u8Path, 'utf8');
+    const matches = [...content.matchAll(/stream(\d+)\.ts/g)];
+    if (matches.length > 0) {
+      const highestNum = Math.max(...matches.map(m => parseInt(m[1], 10)));
+      return highestNum + 1;
+    }
+  } catch (e) {}
+
+  return 0;
+}
 
 function startStream() {
   if (isStreaming) return;
 
   const playlistFile = path.join(__dirname, 'playlist.txt');
   if (!fs.existsSync(playlistFile)) {
-    console.error('playlist.txt not found!');
+    console.error('playlist.txt file not found!');
     setTimeout(startStream, 3000);
     return;
   }
@@ -86,7 +101,15 @@ function startStream() {
 
   isStreaming = true;
 
-  // নো-এনকোডিং, জিরো সিপিইউ লোড, পিওর লাইভ টিভি ফরম্যাট
+  const currentSeq = getNextSequenceNumber();
+  const m3u8Exists = fs.existsSync(path.join(liveDir, 'stream.m3u8'));
+
+  // append_list এর সাথে নতুন ভিডিওর শুরুতে discont_start স্বয়ংক্রিয়ভাবে ডিসকন্টিনিউইটি বসাবে
+  let hlsFlags = 'delete_segments+omit_endlist';
+  if (m3u8Exists) {
+    hlsFlags = 'append_list+delete_segments+omit_endlist+discont_start';
+  }
+
   const ffmpegArgs = [
     '-re',
     '-reconnect', '1',
@@ -97,34 +120,25 @@ function startStream() {
     '-c', 'copy',
     '-f', 'hls',
     '-hls_time', '4',
-    '-hls_list_size', '5',
-    '-start_number', `${globalSequence}`,
-    '-hls_flags', 'delete_segments+omit_endlist',
+    '-hls_list_size', '15', // ৬০ সেকেন্ডের সেফ লাইভ উইন্ডো (বাফার হলেও লিংক হারাবে না)
+    '-start_number', `${currentSeq}`,
+    '-hls_flags', hlsFlags,
     path.join(liveDir, 'stream.m3u8')
   ];
 
   const ffmpegProcess = spawn('ffmpeg', ffmpegArgs);
 
-  ffmpegProcess.stderr.on('data', (data) => {
-    const text = data.toString();
-    const match = text.match(/Opening '.*stream(\d+)\.ts'/);
-    if (match && match[1]) {
-      const currentNum = parseInt(match[1], 10);
-      if (currentNum >= globalSequence) {
-        globalSequence = currentNum + 1;
-      }
-    }
-  });
+  ffmpegProcess.stderr.on('data', () => {});
 
   ffmpegProcess.on('close', (code) => {
     console.log(`Video ended (${code}). Seamlessly switching to next...`);
     isStreaming = false;
     currentIndex = (currentIndex + 1) % lines.length;
-    setTimeout(startStream, 100);
+    setTimeout(startStream, 50); // কোনো গ্যাপ ছাড়া সাথে সাথে পরের ভিডিও চালু
   });
 
   ffmpegProcess.on('error', (err) => {
-    console.error('FFmpeg error:', err.message);
+    console.error('FFmpeg process error:', err.message);
     isStreaming = false;
     currentIndex = (currentIndex + 1) % lines.length;
     setTimeout(startStream, 1000);
