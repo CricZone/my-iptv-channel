@@ -3,7 +3,6 @@ const cors = require('cors');
 const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
-const https = require('https');
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -11,11 +10,14 @@ const PORT = process.env.PORT || 10000;
 app.use(cors());
 
 const liveDir = path.join(__dirname, 'live');
-if (!fs.existsSync(liveDir)) {
-  fs.mkdirSync(liveDir, { recursive: true });
-}
 
-// নো-ক্যাশ ও লাইভ হেডার
+// সার্ভার স্টার্টে পুরনো ভাঙা সেগমেন্ট ফাইল ক্লিয়ার
+if (fs.existsSync(liveDir)) {
+  fs.rmSync(liveDir, { recursive: true, force: true });
+}
+fs.mkdirSync(liveDir, { recursive: true });
+
+// ব্রাউজার ও এক্সোপ্লেয়ারের জন্য স্ট্রং নো-ক্যাশ হেডার
 app.use('/live', express.static(liveDir, {
   setHeaders: (res, filePath) => {
     res.set('Access-Control-Allow-Origin', '*');
@@ -25,35 +27,15 @@ app.use('/live', express.static(liveDir, {
       res.set('Expires', '0');
       res.set('Content-Type', 'application/vnd.apple.mpegurl');
     } else if (filePath.endsWith('.ts')) {
-      res.set('Cache-Control', 'public, max-age=60');
+      res.set('Cache-Control', 'public, max-age=10');
       res.set('Content-Type', 'video/mp2t');
     }
   }
 }));
 
 app.get('/', (req, res) => {
-  res.send('BDStreamHub Non-Stop Live Streaming Running!');
+  res.send('BDStreamHub Non-Stop 24/7 Live Stream Running!');
 });
-
-const LOGO_REMOTE_URL = 'https://i.postimg.cc/4yQCwk94/1789679552103.png';
-const localLogoPath = path.join(__dirname, 'watermark.png');
-
-// সার্ভার স্টার্টে একবার লোগো ডাউনলোড
-function ensureLogoDownloaded(callback) {
-  if (fs.existsSync(localLogoPath)) {
-    return callback();
-  }
-  const file = fs.createWriteStream(localLogoPath);
-  https.get(LOGO_REMOTE_URL, (response) => {
-    response.pipe(file);
-    file.on('finish', () => {
-      file.close(callback);
-    });
-  }).on('error', (err) => {
-    console.error('Logo download error:', err.message);
-    callback();
-  });
-}
 
 function parseDirectUrl(url) {
   let fileId = '';
@@ -72,20 +54,6 @@ function parseDirectUrl(url) {
 let currentIndex = 0;
 let isStreaming = false;
 let globalSequence = 0;
-
-function getLatestMediaSequence() {
-  const m3u8Path = path.join(liveDir, 'stream.m3u8');
-  if (fs.existsSync(m3u8Path)) {
-    try {
-      const content = fs.readFileSync(m3u8Path, 'utf8');
-      const match = content.match(/#EXT-X-MEDIA-SEQUENCE:(\d+)/);
-      if (match && match[1]) {
-        return parseInt(match[1], 10);
-      }
-    } catch (e) {}
-  }
-  return globalSequence;
-}
 
 function startStream() {
   if (isStreaming) return;
@@ -118,9 +86,7 @@ function startStream() {
 
   isStreaming = true;
 
-  globalSequence = Math.max(globalSequence, getLatestMediaSequence());
-
-  // ভিডিওর ডানদিকের ওপরের কোনায় লোগো স্কেল ও পজিশন করে ওভারলে
+  // নো-এনকোডিং, জিরো সিপিইউ লোড, পিওর লাইভ টিভি ফরম্যাট
   const ffmpegArgs = [
     '-re',
     '-reconnect', '1',
@@ -128,18 +94,12 @@ function startStream() {
     '-reconnect_delay_max', '5',
     '-headers', 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\n',
     '-i', sourceUrl,
-    '-i', localLogoPath,
-    '-filter_complex', '[1:v]scale=85:-1[wm];[0:v][wm]overlay=main_w-overlay_w-20:20',
-    '-c:v', 'libx264',
-    '-preset', 'ultrafast',
-    '-tune', 'zerolatency',
-    '-c:a', 'aac',
-    '-b:a', '128k',
+    '-c', 'copy',
     '-f', 'hls',
-    '-hls_time', '3',
-    '-hls_list_size', '20',
+    '-hls_time', '4',
+    '-hls_list_size', '5',
     '-start_number', `${globalSequence}`,
-    '-hls_flags', 'append_list+delete_segments+omit_endlist+discont_start',
+    '-hls_flags', 'delete_segments+omit_endlist',
     path.join(liveDir, 'stream.m3u8')
   ];
 
@@ -157,23 +117,21 @@ function startStream() {
   });
 
   ffmpegProcess.on('close', (code) => {
-    console.log(`Video ended with code ${code}. Loading next...`);
+    console.log(`Video ended (${code}). Seamlessly switching to next...`);
     isStreaming = false;
     currentIndex = (currentIndex + 1) % lines.length;
-    setTimeout(startStream, 150);
+    setTimeout(startStream, 100);
   });
 
   ffmpegProcess.on('error', (err) => {
-    console.error('FFmpeg process error:', err.message);
+    console.error('FFmpeg error:', err.message);
     isStreaming = false;
     currentIndex = (currentIndex + 1) % lines.length;
     setTimeout(startStream, 1000);
   });
 }
 
-ensureLogoDownloaded(() => {
-  app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-    startStream();
-  });
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+  startStream();
 });
