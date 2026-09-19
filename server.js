@@ -10,109 +10,471 @@ const PORT = process.env.PORT || 10000;
 app.use(cors());
 
 const liveDir = path.join(__dirname, 'live');
+const playlistFile = path.join(__dirname, 'playlist.txt');
+const outputPlaylist = path.join(liveDir, 'stream.m3u8');
+
+// ==================================================
+// Create live folder
+// ==================================================
+
 if (!fs.existsSync(liveDir)) {
   fs.mkdirSync(liveDir, { recursive: true });
 }
 
-// নো-বাফার হেডার
+// ==================================================
+// Delete old HLS files
+// ==================================================
+
+function cleanLiveFiles() {
+  try {
+    const files = fs.readdirSync(liveDir);
+
+    for (const file of files) {
+      if (
+        file.endsWith('.ts') ||
+        file.endsWith('.m3u8') ||
+        file.endsWith('.tmp')
+      ) {
+        try {
+          fs.unlinkSync(path.join(liveDir, file));
+        } catch (err) {
+          console.log(`Delete error: ${file}`);
+        }
+      }
+    }
+
+    console.log('Old HLS files cleaned.');
+  } catch (err) {
+    console.log('Cleanup error:', err.message);
+  }
+}
+
+// Clean when server starts
+cleanLiveFiles();
+
+// ==================================================
+// Serve HLS files
+// ==================================================
+
 app.use('/live', express.static(liveDir, {
+  etag: false,
+
   setHeaders: (res, filePath) => {
     res.set('Access-Control-Allow-Origin', '*');
+
     if (filePath.endsWith('.m3u8')) {
-      res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
-      res.set('Content-Type', 'application/vnd.apple.mpegurl');
-    } else if (filePath.endsWith('.ts')) {
-      res.set('Cache-Control', 'public, max-age=10');
-      res.set('Content-Type', 'video/mp2t');
+      res.set(
+        'Cache-Control',
+        'no-cache, no-store, must-revalidate'
+      );
+
+      res.set(
+        'Content-Type',
+        'application/vnd.apple.mpegurl'
+      );
+    }
+
+    if (filePath.endsWith('.ts')) {
+      res.set(
+        'Cache-Control',
+        'no-cache, no-store, must-revalidate'
+      );
+
+      res.set(
+        'Content-Type',
+        'video/mp2t'
+      );
     }
   }
 }));
 
+// ==================================================
+// Home
+// ==================================================
+
 app.get('/', (req, res) => {
-  res.send('BDStreamHub Sequential Live Streaming Running!');
+  res.send('BDStreamHub Sequential Live Streaming V2 Running!');
 });
 
-function parseDirectUrl(url) {
-  let fileId = '';
-  const match1 = url.match(/\/d\/([a-zA-Z0-9_-]+)/);
-  const match2 = url.match(/id=([a-zA-Z0-9_-]+)/);
-  
-  if (match1 && match1[1]) fileId = match1[1];
-  else if (match2 && match2[1]) fileId = match2[1];
+// ==================================================
+// Read playlist.txt
+// ==================================================
 
-  if (fileId) {
-    return `https://drive.google.com/uc?export=download&id=${fileId}&confirm=t`;
+function getPlaylist() {
+  if (!fs.existsSync(playlistFile)) {
+    return [];
   }
-  return url;
+
+  try {
+    return fs.readFileSync(playlistFile, 'utf8')
+      .split(/\r?\n/)
+      .map(line => line.trim())
+      .filter(line => {
+        return line && !line.startsWith('#');
+      });
+  } catch (err) {
+    console.log('Playlist read error:', err.message);
+    return [];
+  }
 }
+
+// ==================================================
+// Remove old playlist
+// ==================================================
+
+function removeOldPlaylist() {
+  try {
+    if (fs.existsSync(outputPlaylist)) {
+      fs.unlinkSync(outputPlaylist);
+    }
+  } catch (err) {
+    console.log(
+      'Could not remove old playlist:',
+      err.message
+    );
+  }
+}
+
+// ==================================================
+// State
+// ==================================================
 
 let currentIndex = 0;
 let isStreaming = false;
+let ffmpegProcess = null;
+let stopping = false;
+
+// ==================================================
+// Start next stream
+// ==================================================
 
 function startStream() {
-  if (isStreaming) return;
 
-  const playlistFile = path.join(__dirname, 'playlist.txt');
-  if (!fs.existsSync(playlistFile)) {
+  if (isStreaming || stopping) {
+    return;
+  }
+
+  const playlist = getPlaylist();
+
+  // No playlist
+  if (playlist.length === 0) {
+    console.log('playlist.txt is empty or missing.');
+
     setTimeout(startStream, 3000);
     return;
   }
 
-  const lines = fs.readFileSync(playlistFile, 'utf8')
-    .split('\n')
-    .map(l => l.trim())
-    .filter(Boolean);
-
-  if (lines.length === 0) {
-    setTimeout(startStream, 3000);
-    return;
-  }
-
-  if (currentIndex >= lines.length) {
+  // Reset index
+  if (currentIndex >= playlist.length) {
     currentIndex = 0;
   }
 
-  const rawUrl = lines[currentIndex];
-  const sourceUrl = parseDirectUrl(rawUrl);
-  console.log(`[Playing Video ${currentIndex + 1} of ${lines.length}]: ${sourceUrl}`);
+  // IMPORTANT:
+  // URL is already a direct Google Drive URL.
+  // No URL conversion is performed.
+
+  const sourceUrl = playlist[currentIndex];
+
+  console.log('');
+  console.log('==========================================');
+  console.log(
+    `▶ Playing Video ${currentIndex + 1} / ${playlist.length}`
+  );
+  console.log('==========================================');
 
   isStreaming = true;
 
-  // বাফারিং বা আগের ভিডিওতে ব্যাক করা বন্ধ করার জন্য প্যারামিটার
+  // Remove old playlist before new FFmpeg session
+  removeOldPlaylist();
+
+  // ==================================================
+  // FFmpeg
+  // ==================================================
+
   const ffmpegArgs = [
+
+    // Read at real-time speed
     '-re',
+
+    // Network reconnect
     '-reconnect', '1',
     '-reconnect_streamed', '1',
+    '-reconnect_at_eof', '1',
     '-reconnect_delay_max', '5',
-    '-headers', 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\n',
-    '-i', sourceUrl,
-    '-c', 'copy',
-    '-avoid_negative_ts', 'make_zero',
-    '-f', 'hls',
-    '-hls_time', '3',
-    '-hls_list_size', '6',
-    '-hls_flags', 'delete_segments+append_list+omit_endlist+discont_start',
-    path.join(liveDir, 'stream.m3u8')
+
+    // User Agent
+    '-user_agent',
+    'Mozilla/5.0',
+
+    // Input
+    '-i',
+    sourceUrl,
+
+    // ==================================================
+    // VIDEO ENCODING
+    // ==================================================
+
+    '-c:v',
+    'libx264',
+
+    '-preset',
+    'veryfast',
+
+    '-tune',
+    'zerolatency',
+
+    '-pix_fmt',
+    'yuv420p',
+
+    // 30 FPS
+    '-r',
+    '30',
+
+    // Keyframe every 2 seconds
+    '-g',
+    '60',
+
+    '-keyint_min',
+    '60',
+
+    // Consistent GOP
+    '-sc_threshold',
+    '0',
+
+    // ==================================================
+    // AUDIO ENCODING
+    // ==================================================
+
+    '-c:a',
+    'aac',
+
+    '-b:a',
+    '128k',
+
+    '-ar',
+    '48000',
+
+    '-ac',
+    '2',
+
+    // ==================================================
+    // HLS
+    // ==================================================
+
+    '-f',
+    'hls',
+
+    // 4 second segments
+    '-hls_time',
+    '4',
+
+    // Keep 6 segments
+    '-hls_list_size',
+    '6',
+
+    // MPEG-TS
+    '-hls_segment_type',
+    'mpegts',
+
+    // HLS flags
+    '-hls_flags',
+    'delete_segments+independent_segments+omit_endlist+discont_start',
+
+    // Delete extra old segments
+    '-hls_delete_threshold',
+    '2',
+
+    // Segment numbering
+    '-start_number',
+    '0',
+
+    // Segment filename
+    '-hls_segment_filename',
+    path.join(
+      liveDir,
+      'segment_%06d.ts'
+    ),
+
+    // Output playlist
+    outputPlaylist
   ];
 
-  const ffmpegProcess = spawn('ffmpeg', ffmpegArgs);
+  // ==================================================
+  // Start FFmpeg
+  // ==================================================
 
-  ffmpegProcess.stderr.on('data', () => {});
+  ffmpegProcess = spawn(
+    'ffmpeg',
+    ffmpegArgs
+  );
 
-  ffmpegProcess.on('close', () => {
-    isStreaming = false;
-    currentIndex = (currentIndex + 1) % lines.length;
-    setTimeout(startStream, 150); // সাথে সাথে পরের ভিডিও ধরবে
+  // ==================================================
+  // FFmpeg logs
+  // ==================================================
+
+  ffmpegProcess.stderr.on('data', (data) => {
+
+    const message = data.toString();
+
+    // Show errors
+    if (
+      message.includes('Error') ||
+      message.includes('error') ||
+      message.includes('Invalid') ||
+      message.includes('failed')
+    ) {
+      console.log(
+        '[FFmpeg]',
+        message.trim()
+      );
+    }
   });
 
-  ffmpegProcess.on('error', () => {
+  // ==================================================
+  // FFmpeg error
+  // ==================================================
+
+  ffmpegProcess.on('error', (err) => {
+
+    console.log(
+      'FFmpeg process error:',
+      err.message
+    );
+
     isStreaming = false;
-    currentIndex = (currentIndex + 1) % lines.length;
-    setTimeout(startStream, 1000);
+    ffmpegProcess = null;
+
+    goToNextVideo(1000);
+  });
+
+  // ==================================================
+  // FFmpeg closed
+  // ==================================================
+
+  ffmpegProcess.on('close', (code, signal) => {
+
+    console.log(
+      `FFmpeg closed | code=${code} | signal=${signal}`
+    );
+
+    isStreaming = false;
+    ffmpegProcess = null;
+
+    if (stopping) {
+      return;
+    }
+
+    // Go to next video
+    goToNextVideo(500);
   });
 }
 
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+// ==================================================
+// Go to next video
+// ==================================================
+
+function goToNextVideo(delay = 500) {
+
+  const playlist = getPlaylist();
+
+  if (playlist.length === 0) {
+    setTimeout(startStream, 3000);
+    return;
+  }
+
+  currentIndex++;
+
+  // Start again from first video
+  if (currentIndex >= playlist.length) {
+    currentIndex = 0;
+  }
+
+  console.log(
+    `Next video → ${currentIndex + 1}/${playlist.length}`
+  );
+
+  setTimeout(
+    startStream,
+    delay
+  );
+}
+
+// ==================================================
+// Start Server
+// ==================================================
+
+const server = app.listen(PORT, () => {
+
+  console.log('');
+  console.log('==========================================');
+  console.log('BDStreamHub Streaming Server V2');
+  console.log('==========================================');
+
+  console.log(
+    `Server running on port ${PORT}`
+  );
+
+  console.log(
+    'HLS: /live/stream.m3u8'
+  );
+
+  console.log('==========================================');
+
   startStream();
 });
+
+// ==================================================
+// Graceful Shutdown
+// ==================================================
+
+function shutdown() {
+
+  if (stopping) {
+    return;
+  }
+
+  stopping = true;
+
+  console.log(
+    'Stopping BDStreamHub server...'
+  );
+
+  if (ffmpegProcess) {
+
+    try {
+      ffmpegProcess.kill('SIGTERM');
+    } catch (err) {
+      console.log(
+        'FFmpeg stop error:',
+        err.message
+      );
+    }
+  }
+
+  server.close(() => {
+
+    console.log(
+      'Server stopped.'
+    );
+
+    process.exit(0);
+  });
+
+  setTimeout(() => {
+    process.exit(0);
+  }, 5000);
+}
+
+// ==================================================
+// Shutdown events
+// ==================================================
+
+process.on(
+  'SIGINT',
+  shutdown
+);
+
+process.on(
+  'SIGTERM',
+  shutdown
+);
