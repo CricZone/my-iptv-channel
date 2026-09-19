@@ -14,22 +14,24 @@ if (!fs.existsSync(liveDir)) {
   fs.mkdirSync(liveDir, { recursive: true });
 }
 
-// নো-বাফার হেডার
+// সুপার-ফাস্ট নো-বাফার হেডার
 app.use('/live', express.static(liveDir, {
   setHeaders: (res, filePath) => {
     res.set('Access-Control-Allow-Origin', '*');
     if (filePath.endsWith('.m3u8')) {
-      res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+      res.set('Cache-Control', 'no-cache, no-store, must-revalidate, max-age=0');
+      res.set('Pragma', 'no-cache');
+      res.set('Expires', '0');
       res.set('Content-Type', 'application/vnd.apple.mpegurl');
     } else if (filePath.endsWith('.ts')) {
-      res.set('Cache-Control', 'public, max-age=10');
+      res.set('Cache-Control', 'public, max-age=60');
       res.set('Content-Type', 'video/mp2t');
     }
   }
 }));
 
 app.get('/', (req, res) => {
-  res.send('BDStreamHub Sequential Live Streaming Running!');
+  res.send('BDStreamHub Non-Stop Live Streaming Running!');
 });
 
 function parseDirectUrl(url) {
@@ -79,6 +81,7 @@ function startStream() {
 
   isStreaming = true;
 
+  // বাফারিং হলে শুরুতে ব্যাক করা পুরোপুরি বন্ধ করার জন্য অপটিমাইজড প্যারামিটার
   const ffmpegArgs = [
     '-re',
     '-reconnect', '1',
@@ -87,12 +90,13 @@ function startStream() {
     '-headers', 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\n',
     '-i', sourceUrl,
     '-c', 'copy',
-    '-avoid_negative_ts', 'make_zero',
+    '-copyts',
+    '-start_at_zero',
     '-f', 'hls',
     '-hls_time', '3',
-    '-hls_list_size', '6',
+    '-hls_list_size', '10', // উইন্ডো বড় করা হলো যাতে সামান্য বাফারিং হলেও প্লেয়ার লাইভ এজ না হারায়
     '-start_number', `${globalSequence}`,
-    '-hls_flags', 'delete_segments+append_list+omit_endlist+discont_start',
+    '-hls_flags', 'delete_segments+omit_endlist+program_date_time',
     path.join(liveDir, 'stream.m3u8')
   ];
 
@@ -100,8 +104,13 @@ function startStream() {
 
   ffmpegProcess.stderr.on('data', (data) => {
     const text = data.toString();
-    if (text.includes('Opening') && text.includes('.ts')) {
-      globalSequence++;
+    // রিয়েলটাইম সেগমেন্ট ট্র্যাক করে সিকোয়েন্স বাড়ানো
+    const matches = text.match(/Opening '.*stream(\d+)\.ts'/);
+    if (matches && matches[1]) {
+      const segNum = parseInt(matches[1], 10);
+      if (segNum >= globalSequence) {
+        globalSequence = segNum + 1;
+      }
     }
   });
 
