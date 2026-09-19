@@ -5,147 +5,531 @@ const fs = require('fs');
 const path = require('path');
 
 const app = express();
+
 const PORT = process.env.PORT || 10000;
 
 app.use(cors());
 
 const liveDir = path.join(__dirname, 'live');
+const playlistFile = path.join(__dirname, 'playlist.txt');
+const m3u8File = path.join(liveDir, 'stream.m3u8');
 
-// সার্ভার স্টার্টে ডিরেক্টরি ফ্রেশ করা
 if (!fs.existsSync(liveDir)) {
   fs.mkdirSync(liveDir, { recursive: true });
 }
 
-// সুপার-ফাস্ট স্ট্রং নো-ক্যাশ হেডার
+/* =========================================================
+   HLS STATIC SERVER
+========================================================= */
+
 app.use('/live', express.static(liveDir, {
+  etag: false,
+  lastModified: false,
+
   setHeaders: (res, filePath) => {
-    res.set('Access-Control-Allow-Origin', '*');
+
+    res.setHeader('Access-Control-Allow-Origin', '*');
+
     if (filePath.endsWith('.m3u8')) {
-      res.set('Cache-Control', 'no-cache, no-store, must-revalidate, max-age=0');
-      res.set('Pragma', 'no-cache');
-      res.set('Expires', '0');
-      res.set('Content-Type', 'application/vnd.apple.mpegurl');
+
+      res.setHeader(
+        'Cache-Control',
+        'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, s-maxage=0'
+      );
+
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+
+      res.setHeader(
+        'Content-Type',
+        'application/vnd.apple.mpegurl'
+      );
+
     } else if (filePath.endsWith('.ts')) {
-      res.set('Cache-Control', 'public, max-age=60');
-      res.set('Content-Type', 'video/mp2t');
+
+      // Segment cache করা যাবে
+      res.setHeader(
+        'Cache-Control',
+        'public, max-age=120, immutable'
+      );
+
+      res.setHeader(
+        'Content-Type',
+        'video/mp2t'
+      );
     }
   }
 }));
+
+/* =========================================================
+   BASIC ROUTES
+========================================================= */
 
 app.get('/', (req, res) => {
   res.send('BDStreamHub Non-Stop 24/7 Linear Live Running!');
 });
 
+app.get('/status', (req, res) => {
+
+  res.json({
+    streaming: isStreaming,
+    currentVideo: currentIndex + 1,
+    totalVideos: playlist.length,
+    retryCount,
+    pid: ffmpegProcess ? ffmpegProcess.pid : null,
+    playlistExists: fs.existsSync(m3u8File)
+  });
+
+});
+
+/* =========================================================
+   GOOGLE DRIVE URL
+========================================================= */
+
 function parseDirectUrl(url) {
+
+  url = url.trim();
+
   let fileId = '';
-  const match1 = url.match(/\/d\/([a-zA-Z0-9_-]+)/);
-  const match2 = url.match(/id=([a-zA-Z0-9_-]+)/);
-  
-  if (match1 && match1[1]) fileId = match1[1];
-  else if (match2 && match2[1]) fileId = match2[1];
+
+  const match1 = url.match(
+    /\/d\/([a-zA-Z0-9_-]+)/
+  );
+
+  const match2 = url.match(
+    /[?&]id=([a-zA-Z0-9_-]+)/
+  );
+
+  if (match1 && match1[1]) {
+
+    fileId = match1[1];
+
+  } else if (match2 && match2[1]) {
+
+    fileId = match2[1];
+
+  }
 
   if (fileId) {
+
     return `https://drive.usercontent.google.com/download?id=${fileId}&export=download&confirm=t`;
+
   }
+
   return url;
 }
 
+/* =========================================================
+   PLAYLIST
+========================================================= */
+
+let playlist = [];
 let currentIndex = 0;
-let isStreaming = false;
 
-// ডিস্কের আসল ফাইল থেকে নিখুঁত সেগমেন্ট কাউন্টার নির্ধারণ
-function getNextSequenceNumber() {
-  const m3u8Path = path.join(liveDir, 'stream.m3u8');
-  if (!fs.existsSync(m3u8Path)) return 0;
+function loadPlaylist() {
 
-  try {
-    const content = fs.readFileSync(m3u8Path, 'utf8');
-    const matches = [...content.matchAll(/stream(\d+)\.ts/g)];
-    if (matches.length > 0) {
-      const highestNum = Math.max(...matches.map(m => parseInt(m[1], 10)));
-      return highestNum + 1;
-    }
-  } catch (e) {}
+  if (!fs.existsSync(playlistFile)) {
 
-  return 0;
+    console.error('❌ playlist.txt not found');
+
+    playlist = [];
+
+    return false;
+  }
+
+  playlist = fs.readFileSync(
+    playlistFile,
+    'utf8'
+  )
+  .split(/\r?\n/)
+  .map(line => line.trim())
+  .filter(Boolean);
+
+  console.log(
+    `📺 Loaded ${playlist.length} videos`
+  );
+
+  return playlist.length > 0;
 }
 
+/* =========================================================
+   STREAM STATE
+========================================================= */
+
+let ffmpegProcess = null;
+let isStreaming = false;
+
+let retryCount = 0;
+
+const MAX_RETRIES = 3;
+
+/* =========================================================
+   UNIQUE SEGMENT PREFIX
+========================================================= */
+
+function createSegmentPattern() {
+
+  const uniqueId =
+    `${Date.now()}_${process.pid}`;
+
+  return path.join(
+    liveDir,
+    `seg_${uniqueId}_%06d.ts`
+  );
+}
+
+/* =========================================================
+   START STREAM
+========================================================= */
+
 function startStream() {
-  if (isStreaming) return;
 
-  const playlistFile = path.join(__dirname, 'playlist.txt');
-  if (!fs.existsSync(playlistFile)) {
-    console.error('playlist.txt file not found!');
-    setTimeout(startStream, 3000);
+  if (isStreaming) {
+
+    console.log(
+      '⚠️ FFmpeg already running'
+    );
+
     return;
   }
 
-  const lines = fs.readFileSync(playlistFile, 'utf8')
-    .split('\n')
-    .map(l => l.trim())
-    .filter(Boolean);
+  if (!loadPlaylist()) {
 
-  if (lines.length === 0) {
-    console.error('playlist.txt is empty!');
-    setTimeout(startStream, 3000);
+    console.log(
+      '⏳ Playlist unavailable. Retrying...'
+    );
+
+    setTimeout(
+      startStream,
+      5000
+    );
+
     return;
   }
 
-  if (currentIndex >= lines.length) {
+  if (currentIndex >= playlist.length) {
+
     currentIndex = 0;
   }
 
-  const rawUrl = lines[currentIndex];
-  const sourceUrl = parseDirectUrl(rawUrl);
-  console.log(`[Playing Video ${currentIndex + 1} of ${lines.length}]: ${sourceUrl}`);
+  const rawUrl =
+    playlist[currentIndex];
+
+  const sourceUrl =
+    parseDirectUrl(rawUrl);
+
+  console.log('');
+  console.log(
+    '========================================'
+  );
+
+  console.log(
+    `▶️ Playing ${currentIndex + 1}/${playlist.length}`
+  );
+
+  console.log(
+    `URL: ${sourceUrl}`
+  );
+
+  console.log(
+    `Retry: ${retryCount}/${MAX_RETRIES}`
+  );
+
+  console.log(
+    '========================================'
+  );
 
   isStreaming = true;
 
-  const currentSeq = getNextSequenceNumber();
-  const m3u8Exists = fs.existsSync(path.join(liveDir, 'stream.m3u8'));
+  const segmentPattern =
+    createSegmentPattern();
 
-  // append_list এর সাথে নতুন ভিডিওর শুরুতে discont_start স্বয়ংক্রিয়ভাবে ডিসকন্টিনিউইটি বসাবে
-  let hlsFlags = 'delete_segments+omit_endlist';
-  if (m3u8Exists) {
-    hlsFlags = 'append_list+delete_segments+omit_endlist+discont_start';
-  }
+  /*
+    append_list:
+    পুরোনো HLS playlist-এর সঙ্গে নতুন segment যোগ করবে।
+
+    delete_segments:
+    অনেক পুরোনো segment delete করবে।
+
+    discont_start:
+    নতুন ভিডিও শুরু হলে HLS discontinuity দেবে।
+
+    omit_endlist:
+    live playlist হিসেবে রাখবে।
+
+    temp_file:
+    সম্পূর্ণ segment/playlist তৈরি হওয়ার পর publish করবে।
+  */
+
+  const hlsFlags =
+    'append_list+delete_segments+discont_start+omit_endlist+temp_file';
 
   const ffmpegArgs = [
+
+    // Input real-time speed
     '-re',
+
+    // HTTP reconnect
     '-reconnect', '1',
     '-reconnect_streamed', '1',
-    '-reconnect_delay_max', '5',
-    '-headers', 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\n',
-    '-i', sourceUrl,
+    '-reconnect_at_eof', '1',
+    '-reconnect_on_network_error', '1',
+    '-reconnect_delay_max', '10',
+
+    // Network timeout
+    '-rw_timeout', '30000000',
+
+    // HTTP User-Agent
+    '-user_agent',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131 Safari/537.36',
+
+    // Input
+    '-i',
+    sourceUrl,
+
+    /*
+      বর্তমান system-এ CPU বাঁচানোর জন্য copy।
+    */
+    '-map', '0:v:0?',
+    '-map', '0:a:0?',
     '-c', 'copy',
+
+    // HLS
     '-f', 'hls',
+
+    // 4 sec target segment
     '-hls_time', '4',
-    '-hls_list_size', '15', // ৬০ সেকেন্ডের সেফ লাইভ উইন্ডো (বাফার হলেও লিংক হারাবে না)
-    '-start_number', `${currentSeq}`,
-    '-hls_flags', hlsFlags,
-    path.join(liveDir, 'stream.m3u8')
+
+    /*
+      30 segment × 4 sec ≈ 120 sec
+      live window
+    */
+    '-hls_list_size', '30',
+
+    /*
+      অতিরিক্ত segment রেখে দেবে।
+      Slow client-এর জন্য নিরাপদ।
+    */
+    '-hls_delete_threshold', '10',
+
+    // Segment filename
+    '-hls_segment_filename',
+    segmentPattern,
+
+    // HLS flags
+    '-hls_flags',
+    hlsFlags,
+
+    // MPEG-TS
+    '-hls_segment_type',
+    'mpegts',
+
+    // Final playlist
+    m3u8File
   ];
 
-  const ffmpegProcess = spawn('ffmpeg', ffmpegArgs);
+  console.log(
+    '🚀 Starting FFmpeg...'
+  );
 
-  ffmpegProcess.stderr.on('data', () => {});
+  ffmpegProcess =
+    spawn('ffmpeg', ffmpegArgs);
 
-  ffmpegProcess.on('close', (code) => {
-    console.log(`Video ended (${code}). Seamlessly switching to next...`);
-    isStreaming = false;
-    currentIndex = (currentIndex + 1) % lines.length;
-    setTimeout(startStream, 50); // কোনো গ্যাপ ছাড়া সাথে সাথে পরের ভিডিও চালু
-  });
+  /* =====================================================
+     FFmpeg STDERR
+  ===================================================== */
 
-  ffmpegProcess.on('error', (err) => {
-    console.error('FFmpeg process error:', err.message);
-    isStreaming = false;
-    currentIndex = (currentIndex + 1) % lines.length;
-    setTimeout(startStream, 1000);
-  });
+  ffmpegProcess.stderr.on(
+    'data',
+    data => {
+
+      const message =
+        data.toString().trim();
+
+      if (message) {
+
+        console.log(
+          `[FFmpeg] ${message}`
+        );
+      }
+
+    }
+  );
+
+  /* =====================================================
+     FFmpeg ERROR
+  ===================================================== */
+
+  ffmpegProcess.on(
+    'error',
+    error => {
+
+      console.error(
+        '❌ FFmpeg spawn error:',
+        error.message
+      );
+
+      isStreaming = false;
+
+      ffmpegProcess = null;
+
+      handleStreamFailure();
+    }
+  );
+
+  /* =====================================================
+     FFmpeg CLOSE
+  ===================================================== */
+
+  ffmpegProcess.on(
+    'close',
+    code => {
+
+      console.log(
+        `🛑 FFmpeg closed. Code: ${code}`
+      );
+
+      isStreaming = false;
+
+      ffmpegProcess = null;
+
+      /*
+        code 0:
+        সাধারণত ভিডিও শেষ হয়েছে।
+
+        non-zero:
+        error/crash/network/input problem হতে পারে।
+      */
+
+      if (code === 0) {
+
+        console.log(
+          `✅ Video ${currentIndex + 1} finished normally`
+        );
+
+        retryCount = 0;
+
+        currentIndex =
+          (currentIndex + 1) %
+          playlist.length;
+
+        /*
+          খুব ছোট delay,
+          কিন্তু 50ms-এর মতো অতিরিক্ত aggressive নয়।
+        */
+
+        setTimeout(
+          startStream,
+          300
+        );
+
+      } else {
+
+        console.error(
+          `❌ Video ${currentIndex + 1} failed with code ${code}`
+        );
+
+        handleStreamFailure();
+      }
+
+    }
+  );
 }
 
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-  startStream();
-});
+/* =========================================================
+   FAILURE HANDLER
+========================================================= */
+
+function handleStreamFailure() {
+
+  retryCount++;
+
+  /*
+    প্রথম 3 বার একই ভিডিও retry
+  */
+
+  if (
+    retryCount <= MAX_RETRIES
+  ) {
+
+    console.log(
+      `🔄 Retrying same video... ${retryCount}/${MAX_RETRIES}`
+    );
+
+    setTimeout(
+      startStream,
+      3000
+    );
+
+    return;
+  }
+
+  /*
+    3 বার fail করলে পরের ভিডিও
+  */
+
+  console.error(
+    `⚠️ Video failed ${MAX_RETRIES} times. Skipping.`
+  );
+
+  retryCount = 0;
+
+  currentIndex =
+    (currentIndex + 1) %
+    playlist.length;
+
+  setTimeout(
+    startStream,
+    1000
+  );
+}
+
+/* =========================================================
+   CLEAN SHUTDOWN
+========================================================= */
+
+function shutdown() {
+
+  console.log(
+    '🛑 Shutting down...'
+  );
+
+  if (ffmpegProcess) {
+
+    ffmpegProcess.kill(
+      'SIGTERM'
+    );
+  }
+
+  process.exit(0);
+}
+
+process.on(
+  'SIGTERM',
+  shutdown
+);
+
+process.on(
+  'SIGINT',
+  shutdown
+);
+
+/* =========================================================
+   START SERVER
+========================================================= */
+
+app.listen(
+  PORT,
+  () => {
+
+    console.log(
+      `🚀 Server running on port ${PORT}`
+    );
+
+    console.log(
+      `📡 HLS: /live/stream.m3u8`
+    );
+
+    startStream();
+  }
+);
