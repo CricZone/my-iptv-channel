@@ -14,7 +14,7 @@ if (!fs.existsSync(liveDir)) {
   fs.mkdirSync(liveDir, { recursive: true });
 }
 
-// সুপার-ফাস্ট নো-বাফার হেডার
+// নো-ক্যাশ ও লাইভ হেডার
 app.use('/live', express.static(liveDir, {
   setHeaders: (res, filePath) => {
     res.set('Access-Control-Allow-Origin', '*');
@@ -52,11 +52,26 @@ let currentIndex = 0;
 let isStreaming = false;
 let globalSequence = 0;
 
+function getLatestMediaSequence() {
+  const m3u8Path = path.join(liveDir, 'stream.m3u8');
+  if (fs.existsSync(m3u8Path)) {
+    try {
+      const content = fs.readFileSync(m3u8Path, 'utf8');
+      const match = content.match(/#EXT-X-MEDIA-SEQUENCE:(\d+)/);
+      if (match && match[1]) {
+        return parseInt(match[1], 10);
+      }
+    } catch (e) {}
+  }
+  return globalSequence;
+}
+
 function startStream() {
   if (isStreaming) return;
 
   const playlistFile = path.join(__dirname, 'playlist.txt');
   if (!fs.existsSync(playlistFile)) {
+    console.error('playlist.txt not found!');
     setTimeout(startStream, 3000);
     return;
   }
@@ -67,6 +82,7 @@ function startStream() {
     .filter(Boolean);
 
   if (lines.length === 0) {
+    console.error('playlist.txt is empty!');
     setTimeout(startStream, 3000);
     return;
   }
@@ -81,7 +97,9 @@ function startStream() {
 
   isStreaming = true;
 
-  // বাফারিং হলে শুরুতে ব্যাক করা পুরোপুরি বন্ধ করার জন্য অপটিমাইজড প্যারামিটার
+  // বর্তমান মিডিয়া সিকোয়েন্স নিশ্চিত করা
+  globalSequence = Math.max(globalSequence, getLatestMediaSequence());
+
   const ffmpegArgs = [
     '-re',
     '-reconnect', '1',
@@ -90,13 +108,11 @@ function startStream() {
     '-headers', 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\n',
     '-i', sourceUrl,
     '-c', 'copy',
-    '-copyts',
-    '-start_at_zero',
     '-f', 'hls',
     '-hls_time', '3',
-    '-hls_list_size', '10', // উইন্ডো বড় করা হলো যাতে সামান্য বাফারিং হলেও প্লেয়ার লাইভ এজ না হারায়
+    '-hls_list_size', '20', // ২০টি সেগমেন্ট (৬০ সেকেন্ড বাফার উইন্ডো)
     '-start_number', `${globalSequence}`,
-    '-hls_flags', 'delete_segments+omit_endlist+program_date_time',
+    '-hls_flags', 'append_list+delete_segments+omit_endlist+discont_start',
     path.join(liveDir, 'stream.m3u8')
   ];
 
@@ -104,23 +120,24 @@ function startStream() {
 
   ffmpegProcess.stderr.on('data', (data) => {
     const text = data.toString();
-    // রিয়েলটাইম সেগমেন্ট ট্র্যাক করে সিকোয়েন্স বাড়ানো
-    const matches = text.match(/Opening '.*stream(\d+)\.ts'/);
-    if (matches && matches[1]) {
-      const segNum = parseInt(matches[1], 10);
-      if (segNum >= globalSequence) {
-        globalSequence = segNum + 1;
+    const match = text.match(/Opening '.*stream(\d+)\.ts'/);
+    if (match && match[1]) {
+      const currentNum = parseInt(match[1], 10);
+      if (currentNum >= globalSequence) {
+        globalSequence = currentNum + 1;
       }
     }
   });
 
-  ffmpegProcess.on('close', () => {
+  ffmpegProcess.on('close', (code) => {
+    console.log(`Video ended with code ${code}. Loading next...`);
     isStreaming = false;
     currentIndex = (currentIndex + 1) % lines.length;
     setTimeout(startStream, 150);
   });
 
-  ffmpegProcess.on('error', () => {
+  ffmpegProcess.on('error', (err) => {
+    console.error('FFmpeg process error:', err.message);
     isStreaming = false;
     currentIndex = (currentIndex + 1) % lines.length;
     setTimeout(startStream, 1000);
