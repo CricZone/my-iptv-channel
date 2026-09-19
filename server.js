@@ -3,6 +3,7 @@ const cors = require('cors');
 const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const https = require('https');
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -33,6 +34,26 @@ app.use('/live', express.static(liveDir, {
 app.get('/', (req, res) => {
   res.send('BDStreamHub Non-Stop Live Streaming Running!');
 });
+
+const LOGO_REMOTE_URL = 'https://i.postimg.cc/4yQCwk94/1789679552103.png';
+const localLogoPath = path.join(__dirname, 'watermark.png');
+
+// সার্ভার স্টার্টে একবার লোগো ডাউনলোড
+function ensureLogoDownloaded(callback) {
+  if (fs.existsSync(localLogoPath)) {
+    return callback();
+  }
+  const file = fs.createWriteStream(localLogoPath);
+  https.get(LOGO_REMOTE_URL, (response) => {
+    response.pipe(file);
+    file.on('finish', () => {
+      file.close(callback);
+    });
+  }).on('error', (err) => {
+    console.error('Logo download error:', err.message);
+    callback();
+  });
+}
 
 function parseDirectUrl(url) {
   let fileId = '';
@@ -97,9 +118,9 @@ function startStream() {
 
   isStreaming = true;
 
-  // বর্তমান মিডিয়া সিকোয়েন্স নিশ্চিত করা
   globalSequence = Math.max(globalSequence, getLatestMediaSequence());
 
+  // ভিডিওর ডানদিকের ওপরের কোনায় লোগো স্কেল ও পজিশন করে ওভারলে
   const ffmpegArgs = [
     '-re',
     '-reconnect', '1',
@@ -107,10 +128,16 @@ function startStream() {
     '-reconnect_delay_max', '5',
     '-headers', 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\n',
     '-i', sourceUrl,
-    '-c', 'copy',
+    '-i', localLogoPath,
+    '-filter_complex', '[1:v]scale=85:-1[wm];[0:v][wm]overlay=main_w-overlay_w-20:20',
+    '-c:v', 'libx264',
+    '-preset', 'ultrafast',
+    '-tune', 'zerolatency',
+    '-c:a', 'aac',
+    '-b:a', '128k',
     '-f', 'hls',
     '-hls_time', '3',
-    '-hls_list_size', '20', // ২০টি সেগমেন্ট (৬০ সেকেন্ড বাফার উইন্ডো)
+    '-hls_list_size', '20',
     '-start_number', `${globalSequence}`,
     '-hls_flags', 'append_list+delete_segments+omit_endlist+discont_start',
     path.join(liveDir, 'stream.m3u8')
@@ -144,7 +171,9 @@ function startStream() {
   });
 }
 
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-  startStream();
+ensureLogoDownloaded(() => {
+  app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+    startStream();
+  });
 });
