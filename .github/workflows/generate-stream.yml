@@ -26,7 +26,8 @@ jobs:
       - name: Install FFmpeg and Tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg curl wget file jq
+          sudo apt-get install -y ffmpeg curl wget file jq python3-pip
+          pip3 install --upgrade gdown --break-system-packages || pip install --upgrade gdown
 
       - name: Prepare Directories
         run: |
@@ -74,32 +75,30 @@ jobs:
             for RETRY in 1 2 3; do
               rm -f "$OUTPUT"
               if [ -n "$FILE_ID" ]; then
-                DOWNLOAD_URL="https://drive.usercontent.google.com/download?id=${FILE_ID}&export=download&confirm=t"
+                echo "Downloading via gdown (Attempt $RETRY/3) for File ID: $FILE_ID"
+                gdown "https://drive.google.com/uc?id=${FILE_ID}" -O "$OUTPUT" --fuzzy
               else
-                DOWNLOAD_URL="$RAW_URL"
+                echo "Downloading via curl (Attempt $RETRY/3) for Direct URL"
+                curl -fL --retry 2 --retry-delay 5 -A "Mozilla/5.0" "$RAW_URL" -o "$OUTPUT"
               fi
 
-              curl -fL --retry 2 --retry-delay 5 --connect-timeout 30 --max-time 1800 \
-                -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" \
-                "$DOWNLOAD_URL" -o "$OUTPUT"
-
-              if [ ! -s "$OUTPUT" ]; then
-                sleep 5
-                continue
-              fi
-
-              FILE_TYPE=$(file -b --mime-type "$OUTPUT")
-              if [[ "$FILE_TYPE" == video/* ]] || [[ "$FILE_TYPE" == application/octet-stream ]]; then
-                SUCCESS=1
-                break
+              if [ -s "$OUTPUT" ]; then
+                FILE_SIZE=$(stat -c%s "$OUTPUT")
+                # ফাইল সাইজ কমপক্ষে ১ এমবি নিশ্চিত করা (যাতে এইচটিএমএল পেজ বাদ যায়)
+                if [ "$FILE_SIZE" -gt 1048576 ]; then
+                  echo "$OUTPUT" >> downloaded.txt
+                  echo "✅ Video $INDEX downloaded successfully ($((FILE_SIZE / 1024 / 1024)) MB)."
+                  SUCCESS=1
+                  break
+                else
+                  echo "❌ Downloaded file is too small (HTML error page), deleting..."
+                  rm -f "$OUTPUT"
+                fi
               fi
               sleep 5
             done
 
-            if [ "$SUCCESS" -eq 1 ]; then
-              echo "$OUTPUT" >> downloaded.txt
-              echo "✅ Video $INDEX downloaded."
-            else
+            if [ "$SUCCESS" -ne 1 ]; then
               echo "⚠️ Video $INDEX failed, skipping."
             fi
           done < video_urls.txt
@@ -137,7 +136,7 @@ jobs:
           
           FFMPEG_PID=$!
           
-          # রানার ৫ ঘণ্টা সচল রেখে প্রতি ৪০ সেকেন্ড পরপর গিটহাবে পুশ করবে
+          # রানার ৫ ঘণ্টা লাইভ রেখে প্রতি ৪০ সেকেন্ড পরপর গিটহাবে পুশ করবে
           for i in {1..450}; do
             sleep 40
             if [ -f "live/stream.m3u8" ]; then
