@@ -1,14 +1,13 @@
-FROM node:20-bullseye-slim
+FROM node:20-alpine
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# FFmpeg, Python এবং yt-dlp ইনস্টল (Alpine Linux-এ কোনো প্যাকেজ এরর হয় না)
+RUN apk update && apk add --no-cache \
     ffmpeg \
     curl \
     python3 \
-    python3-pip \
+    py3-pip \
     ca-certificates \
-    && pip3 install --no-cache-dir yt-dlp \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+    && pip install --no-cache-dir --break-system-packages yt-dlp
 
 WORKDIR /app
 
