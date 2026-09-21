@@ -2,10 +2,6 @@ name: Generate Live HLS Stream
 
 on:
   workflow_dispatch:
-
-  # প্রতি 5 ঘণ্টা 30 মিনিটে নতুন runner শুরু করার চেষ্টা
-  # পুরোনো job শেষ হওয়ার আগেই নতুন job না চালানোর জন্য
-  # concurrency ব্যবহার করা হয়েছে।
   schedule:
     - cron: '0 */5 * * *'
 
@@ -14,362 +10,143 @@ permissions:
 
 concurrency:
   group: bdstreamhub-live
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
-
   build-stream:
-
     runs-on: ubuntu-latest
-
     timeout-minutes: 350
 
     steps:
-
-      # =====================================================
-      # CHECKOUT
-      # =====================================================
-
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-
-      # =====================================================
-      # INSTALL TOOLS
-      # =====================================================
-
       - name: Install FFmpeg and Tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            ffmpeg \
-            curl \
-            wget \
-            file \
-            jq
+          sudo apt-get install -y ffmpeg curl wget file jq
 
-
-      # =====================================================
-      # PREPARE LIVE DIRECTORY
-      # =====================================================
-
-      - name: Prepare Live Directory
+      - name: Prepare Directories
         run: |
-          rm -rf live
-          mkdir -p live
-          mkdir -p videos
-
-          echo "Live directory prepared."
-
-
-      # =====================================================
-      # CHECK PLAYLIST
-      # =====================================================
+          rm -rf live videos
+          mkdir -p live videos
+          echo "Directories prepared."
 
       - name: Check Playlist
         run: |
-
           if [ ! -f "playlist.txt" ]; then
             echo "❌ playlist.txt not found!"
             exit 1
           fi
-
           TOTAL=$(grep -v '^#' playlist.txt | grep -E '^https?://' | wc -l)
-
           echo "Total videos: $TOTAL"
-
           if [ "$TOTAL" -eq 0 ]; then
             echo "❌ playlist.txt has no valid URLs!"
             exit 1
           fi
 
-
-      # =====================================================
-      # CREATE VIDEO LIST
-      # =====================================================
-
       - name: Create Video List
         run: |
-
-          grep -v '^#' playlist.txt \
-            | grep -E '^https?://' \
-            > video_urls.txt
-
+          grep -v '^#' playlist.txt | grep -E '^https?://' > video_urls.txt
           nl -ba video_urls.txt
-
-          echo "Video list created."
-
-
-      # =====================================================
-      # DOWNLOAD ALL VIDEOS
-      # =====================================================
 
       - name: Download Videos
         shell: bash
         run: |
-
           set +e
-
           TOTAL=$(wc -l < video_urls.txt)
           INDEX=0
-
           rm -f downloaded.txt
           touch downloaded.txt
 
-          while IFS= read -r RAW_URL
-          do
-
+          while IFS= read -r RAW_URL; do
             INDEX=$((INDEX + 1))
-
-            echo ""
             echo "========================================"
-            echo "VIDEO $INDEX / $TOTAL"
+            echo "Downloading Video $INDEX / $TOTAL"
             echo "========================================"
 
-            echo "URL:"
-            echo "$RAW_URL"
-
-            FILE_ID=$(echo "$RAW_URL" | grep -oP \
-              '(?<=/d/)[a-zA-Z0-9_-]+|(?<=[?&]id=)[a-zA-Z0-9_-]+' \
-              | head -n 1)
-
+            FILE_ID=$(echo "$RAW_URL" | grep -oP '(?<=/d/)[a-zA-Z0-9_-]+|(?<=[?&]id=)[a-zA-Z0-9_-]+' | head -n 1)
             OUTPUT="videos/video_${INDEX}.mp4"
-
-            rm -f "$OUTPUT"
-
             SUCCESS=0
 
-            # -------------------------------------------------
-            # RETRY DOWNLOAD 3 TIMES
-            # -------------------------------------------------
-
-            for RETRY in 1 2 3
-            do
-
-              echo ""
-              echo "Download attempt: $RETRY / 3"
-
+            for RETRY in 1 2 3; do
               rm -f "$OUTPUT"
-
               if [ -n "$FILE_ID" ]; then
-
-                echo "Google Drive File ID: $FILE_ID"
-
-                curl -fL \
-                  --retry 2 \
-                  --retry-delay 5 \
-                  --connect-timeout 30 \
-                  --max-time 1800 \
-                  -A "Mozilla/5.0" \
-                  "https://drive.usercontent.google.com/download?id=${FILE_ID}&export=download&confirm=t" \
-                  -o "$OUTPUT"
-
+                DOWNLOAD_URL="https://drive.usercontent.google.com/download?id=${FILE_ID}&export=download&confirm=t"
               else
-
-                echo "Direct URL detected."
-
-                curl -fL \
-                  --retry 2 \
-                  --retry-delay 5 \
-                  --connect-timeout 30 \
-                  --max-time 1800 \
-                  -A "Mozilla/5.0" \
-                  "$RAW_URL" \
-                  -o "$OUTPUT"
-
+                DOWNLOAD_URL="$RAW_URL"
               fi
 
-              CURL_EXIT=$?
-
-              if [ "$CURL_EXIT" -ne 0 ]; then
-                echo "❌ curl failed: $CURL_EXIT"
-                sleep 10
-                continue
-              fi
-
-              # -------------------------------------------------
-              # VALIDATE FILE
-              # -------------------------------------------------
+              curl -fL --retry 2 --retry-delay 5 --connect-timeout 30 --max-time 1800 \
+                -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" \
+                "$DOWNLOAD_URL" -o "$OUTPUT"
 
               if [ ! -s "$OUTPUT" ]; then
-                echo "❌ Downloaded file is empty."
-                sleep 10
+                sleep 5
                 continue
               fi
 
               FILE_TYPE=$(file -b --mime-type "$OUTPUT")
-
-              echo "MIME type: $FILE_TYPE"
-
-              # -------------------------------------------------
-              # GOOGLE DRIVE HTML ERROR DETECTION
-              # -------------------------------------------------
-
-              if [[ "$FILE_TYPE" == "text/html" ]]; then
-
-                echo ""
-                echo "❌ Google returned HTML instead of video."
-
-                if grep -qi \
-                  "quota exceeded\|Too many users\|Google Drive" \
-                  "$OUTPUT"; then
-
-                  echo ""
-                  echo "========================================"
-                  echo "GOOGLE DRIVE QUOTA ERROR"
-                  echo "========================================"
-                  echo ""
-                  echo "The Google Drive file download quota"
-                  echo "has been exceeded."
-                  echo ""
-                  echo "This cannot be fixed by FFmpeg or curl."
-                  echo "Use another accessible source."
-                  echo "========================================"
-
-                fi
-
-                rm -f "$OUTPUT"
-
-                sleep 15
-
-                continue
-
+              if [[ "$FILE_TYPE" == video/* ]] || [[ "$FILE_TYPE" == application/octet-stream ]]; then
+                SUCCESS=1
+                break
               fi
-
-              # -------------------------------------------------
-              # VIDEO VALIDATION
-              # -------------------------------------------------
-
-              if [[ "$FILE_TYPE" != video/* ]]; then
-
-                echo "❌ Not a valid video:"
-                echo "$FILE_TYPE"
-
-                rm -f "$OUTPUT"
-
-                sleep 10
-
-                continue
-
-              fi
-
-              # -------------------------------------------------
-              # FFPROBE VALIDATION
-              # -------------------------------------------------
-
-              DURATION=$(ffprobe \
-                -v error \
-                -show_entries format=duration \
-                -of default=noprint_wrappers=1:nokey=1 \
-                "$OUTPUT")
-
-              if [ -z "$DURATION" ]; then
-
-                echo "❌ FFprobe could not read video."
-
-                rm -f "$OUTPUT"
-
-                sleep 10
-
-                continue
-
-              fi
-
-              echo "Duration: $DURATION seconds"
-
-              SUCCESS=1
-
-              break
-
+              sleep 5
             done
 
-            # -------------------------------------------------
-            # DOWNLOAD RESULT
-            # -------------------------------------------------
-
             if [ "$SUCCESS" -eq 1 ]; then
-
               echo "$OUTPUT" >> downloaded.txt
-
-              echo "✅ Video $INDEX downloaded successfully."
-
+              echo "✅ Video $INDEX downloaded."
             else
-
-              echo ""
-              echo "⚠️ Video $INDEX failed."
-              echo "Skipping this video."
-
+              echo "⚠️ Video $INDEX failed, skipping."
             fi
-
           done < video_urls.txt
 
-          echo ""
-          echo "========================================"
-          echo "DOWNLOAD COMPLETE"
-          echo "========================================"
-
           COUNT=$(wc -l < downloaded.txt)
-
-          echo "Valid videos: $COUNT"
-
           if [ "$COUNT" -eq 0 ]; then
             echo "❌ No valid videos downloaded."
             exit 1
           fi
 
-
-      # =====================================================
-      # CREATE CONCAT FILE
-      # =====================================================
-
       - name: Create FFmpeg Concat Playlist
         run: |
-
           rm -f concat.txt
-
-          while IFS= read -r VIDEO
-          do
-
+          while IFS= read -r VIDEO; do
             ABS_PATH="$(realpath "$VIDEO")"
-
             echo "file '$ABS_PATH'" >> concat.txt
-
           done < downloaded.txt
-
-          echo ""
-          echo "FFmpeg playlist:"
           cat concat.txt
-
-
-      # =====================================================
-      # START HLS GENERATION
-      # =====================================================
 
       - name: Generate Continuous HLS
         shell: bash
         run: |
-
           set -e
-
-          echo ""
-          echo "========================================"
-          echo "STARTING CONTINUOUS HLS"
-          echo "========================================"
-
-          rm -f live/*.ts
-          rm -f live/*.m3u8
-
-          ffmpeg \
-            -hide_banner \
-            -loglevel warning \
-            -re \
+          ffmpeg -hide_banner -loglevel warning -re \
             -stream_loop -1 \
-            -f concat \
-            -safe 0 \
-            -i concat.txt \
-            -map 0:v:0? \
-            -map 0:a:0? \
-            -c copy \
-            -f
+            -f concat -safe 0 -i concat.txt \
+            -map 0:v:0? -map 0:a:0? \
+            -c:v copy -c:a aac -b:a 128k \
+            -f hls \
+            -hls_time 4 \
+            -hls_list_size 10 \
+            -hls_flags delete_segments+append_list \
+            -hls_segment_filename "live/stream%d.ts" \
+            live/stream.m3u8 &
+          
+          FFMPEG_PID=$!
+          
+          # রানার ৫ ঘণ্টা সচল রেখে প্রতি ৪০ সেকেন্ড পরপর গিটহাবে পুশ করবে
+          for i in {1..450}; do
+            sleep 40
+            if [ -f "live/stream.m3u8" ]; then
+              git config --global user.name "github-actions[bot]"
+              git config --global user.email "github-actions[bot]@users.noreply.github.com"
+              git add live/*.m3u8 live/*.ts
+              git commit -m "Update live stream segments [skip ci]" || true
+              git push origin main || true
+            fi
+          done
+          
+          kill -9 $FFMPEG_PID || true
