@@ -79,7 +79,6 @@ jobs:
 
             echo "Target URL: $TARGET_URL"
 
-            # yt-dlp গুগলের কোটা লিমিট বাইপাস করে সরাসরি ভিডিও স্ট্রিম নামায়
             yt-dlp \
               --no-check-certificates \
               --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131 Safari/537.36" \
@@ -135,15 +134,17 @@ jobs:
           
           FFMPEG_PID=$!
           
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
           for i in {1..450}; do
             sleep 40
             if [ -f "live/stream.m3u8" ]; then
-              git config --global user.name "github-actions[bot]"
-              git config --global user.email "github-actions[bot]@users.noreply.github.com"
               git add live/*.m3u8 live/*.ts
               git commit -m "Update live stream segments [skip ci]" || true
-              git push origin main || true
+              git push origin main --force || true
             fi
           done
           
           kill -9 $FFMPEG_PID || true
+v
