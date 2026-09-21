@@ -27,13 +27,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg curl wget file jq python3-pip
-          pip3 install --upgrade gdown --break-system-packages || pip install --upgrade gdown
+          pip3 install --upgrade yt-dlp --break-system-packages || pip install --upgrade yt-dlp
 
       - name: Prepare Directories
         run: |
           rm -rf live videos
           mkdir -p live videos
-          echo "Directories prepared."
 
       - name: Check Playlist
         run: |
@@ -72,30 +71,31 @@ jobs:
             OUTPUT="videos/video_${INDEX}.mp4"
             SUCCESS=0
 
-            for RETRY in 1 2 3; do
-              rm -f "$OUTPUT"
-              if [ -n "$FILE_ID" ]; then
-                echo "Downloading via Python gdown for ID: $FILE_ID (Attempt $RETRY/3)"
-                python3 -c "import gdown; gdown.download(id='$FILE_ID', output='$OUTPUT', quiet=False)"
-              else
-                echo "Downloading via curl for Direct URL (Attempt $RETRY/3)"
-                curl -fL --retry 2 --retry-delay 5 -A "Mozilla/5.0" "$RAW_URL" -o "$OUTPUT"
-              fi
+            if [ -n "$FILE_ID" ]; then
+              TARGET_URL="https://drive.google.com/file/d/${FILE_ID}/view"
+            else
+              TARGET_URL="$RAW_URL"
+            fi
 
-              if [ -s "$OUTPUT" ]; then
-                FILE_SIZE=$(stat -c%s "$OUTPUT")
-                if [ "$FILE_SIZE" -gt 1048576 ]; then
-                  echo "$OUTPUT" >> downloaded.txt
-                  echo "✅ Video $INDEX downloaded successfully ($((FILE_SIZE / 1024 / 1024)) MB)."
-                  SUCCESS=1
-                  break
-                else
-                  echo "❌ Downloaded file is too small (HTML error page), deleting..."
-                  rm -f "$OUTPUT"
-                fi
+            echo "Target URL: $TARGET_URL"
+
+            # yt-dlp গুগলের কোটা লিমিট বাইপাস করে সরাসরি ভিডিও স্ট্রিম নামায়
+            yt-dlp \
+              --no-check-certificates \
+              --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131 Safari/537.36" \
+              -f "bestvideo+bestaudio/best" \
+              --merge-output-format mp4 \
+              -o "$OUTPUT" \
+              "$TARGET_URL" || true
+
+            if [ -s "$OUTPUT" ]; then
+              FILE_SIZE=$(stat -c%s "$OUTPUT")
+              if [ "$FILE_SIZE" -gt 1048576 ]; then
+                echo "$OUTPUT" >> downloaded.txt
+                echo "✅ Video $INDEX downloaded successfully ($((FILE_SIZE / 1024 / 1024)) MB)."
+                SUCCESS=1
               fi
-              sleep 5
-            done
+            fi
 
             if [ "$SUCCESS" -ne 1 ]; then
               echo "⚠️ Video $INDEX failed, skipping."
