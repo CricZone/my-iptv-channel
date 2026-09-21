@@ -76,7 +76,7 @@ jobs:
               rm -f "$OUTPUT"
               if [ -n "$FILE_ID" ]; then
                 echo "Downloading via gdown (Attempt $RETRY/3) for File ID: $FILE_ID"
-                gdown "https://drive.google.com/uc?id=${FILE_ID}" -O "$OUTPUT" --fuzzy
+                gdown --id "$FILE_ID" -O "$OUTPUT"
               else
                 echo "Downloading via curl (Attempt $RETRY/3) for Direct URL"
                 curl -fL --retry 2 --retry-delay 5 -A "Mozilla/5.0" "$RAW_URL" -o "$OUTPUT"
@@ -84,7 +84,6 @@ jobs:
 
               if [ -s "$OUTPUT" ]; then
                 FILE_SIZE=$(stat -c%s "$OUTPUT")
-                # ফাইল সাইজ কমপক্ষে ১ এমবি নিশ্চিত করা (যাতে এইচটিএমএল পেজ বাদ যায়)
                 if [ "$FILE_SIZE" -gt 1048576 ]; then
                   echo "$OUTPUT" >> downloaded.txt
                   echo "✅ Video $INDEX downloaded successfully ($((FILE_SIZE / 1024 / 1024)) MB)."
@@ -136,7 +135,6 @@ jobs:
           
           FFMPEG_PID=$!
           
-          # রানার ৫ ঘণ্টা লাইভ রেখে প্রতি ৪০ সেকেন্ড পরপর গিটহাবে পুশ করবে
           for i in {1..450}; do
             sleep 40
             if [ -f "live/stream.m3u8" ]; then
