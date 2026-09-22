@@ -13,13 +13,12 @@ const liveDir = path.join(__dirname, 'live');
 const playlistFile = path.join(__dirname, 'playlist.txt');
 const m3u8File = path.join(liveDir, 'stream.m3u8');
 
-// লাইভ ডিরেক্টরি তৈরি
 if (!fs.existsSync(liveDir)) {
   fs.mkdirSync(liveDir, { recursive: true });
 }
 
 /* =========================================================
-   HLS STATIC SERVER (ক্যাশিং ও ফ্রিজিং প্রিভেনশন)
+   HLS STATIC SERVER
 ========================================================= */
 app.use('/live', express.static(liveDir, {
   etag: false,
@@ -40,7 +39,7 @@ app.use('/live', express.static(liveDir, {
 }));
 
 app.get('/', (req, res) => {
-  res.send('BDStreamHub 24/7 Live Engine Running!');
+  res.send('BDStreamHub Live Running!');
 });
 
 app.get('/status', (req, res) => {
@@ -53,48 +52,17 @@ app.get('/status', (req, res) => {
 });
 
 /* =========================================================
-   গুগল ড্রাইভ ডিরেক্ট স্ট্রিম বাইপাস
+   গুগল ড্রাইভ ডিরেক্ট স্ট্রিম হ্যান্ডলার
 ========================================================= */
 function getDirectStreamUrl(rawUrl) {
-  return new Promise((resolve) => {
-    let cleanUrl = rawUrl.trim();
+  let cleanUrl = rawUrl.trim();
+  const fileIdMatch = cleanUrl.match(/(?:id=|\/d\/)([a-zA-Z0-9_-]+)/);
 
-    // /view অথবা uc?id যে ফরম্যাটেই থাকুক ফাইল আইডি বের করা
-    const fileIdMatch = cleanUrl.match(/(?:id=|\/d\/)([a-zA-Z0-9_-]+)/);
-
-    if (fileIdMatch && fileIdMatch[1]) {
-      const fileId = fileIdMatch[1];
-      // ভাইরাস স্ক্যান ওয়ার্নিং বাইপাস করার কনফার্মড এন্ডপয়েন্ট
-      const directGoogleUrl = `https://drive.usercontent.google.com/download?id=${fileId}&export=download&confirm=t`;
-      return resolve(directGoogleUrl);
-    }
-
-    // ড্রাইভ ছাড়া অন্য লিংক থাকলে yt-dlp দিয়ে হ্যান্ডেল করবে
-    const ytdlp = spawn('yt-dlp', [
-      '-g',
-      '-f', 'best[ext=mp4]/best',
-      '--no-check-certificates',
-      '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-      cleanUrl
-    ]);
-
-    let outputUrl = '';
-    ytdlp.stdout.on('data', (data) => {
-      outputUrl += data.toString();
-    });
-
-    ytdlp.on('close', (code) => {
-      if (code === 0 && outputUrl.trim().startsWith('http')) {
-        resolve(outputUrl.trim().split('\n')[0]);
-      } else {
-        resolve(cleanUrl);
-      }
-    });
-
-    ytdlp.on('error', () => {
-      resolve(cleanUrl);
-    });
-  });
+  if (fileIdMatch && fileIdMatch[1]) {
+    const fileId = fileIdMatch[1];
+    return `https://drive.usercontent.google.com/download?id=${fileId}&export=download&confirm=t`;
+  }
+  return cleanUrl;
 }
 
 let playlist = [];
@@ -102,12 +70,8 @@ let currentIndex = 0;
 let ffmpegProcess = null;
 let isStreaming = false;
 
-/* =========================================================
-   প্লেলিস্ট লোড
-========================================================= */
 function loadPlaylist() {
   if (!fs.existsSync(playlistFile)) {
-    console.error('playlist.txt file not found!');
     return false;
   }
 
@@ -119,58 +83,45 @@ function loadPlaylist() {
   return playlist.length > 0;
 }
 
-/* =========================================================
-   নন-স্টপ লাইভ স্ট্রিম কোর ইঞ্জিন
-========================================================= */
-async function startStream() {
+function startStream() {
   if (isStreaming) return;
 
   if (!loadPlaylist()) {
-    console.log('Playlist is empty. Retrying in 5 seconds...');
-    setTimeout(startStream, 5000);
+    setTimeout(startStream, 3000);
     return;
   }
 
-  // ৫০০ বা সব ভিডিও শেষ হলে আবার ১ নম্বর থেকে শুরু
   if (currentIndex >= playlist.length) {
     currentIndex = 0;
   }
 
   const rawUrl = playlist[currentIndex];
-  console.log(`[STREAM] Playing Video [${currentIndex + 1}/${playlist.length}]`);
-
-  const streamInput = await getDirectStreamUrl(rawUrl);
+  const streamInput = getDirectStreamUrl(rawUrl);
   isStreaming = true;
 
+  console.log(`[STREAM] Starting Video [${currentIndex + 1}/${playlist.length}]`);
+
+  // Render CPU বাঁচানোর জন্য আল্ট্রা-লাইট কপি মোড
   const ffmpegArgs = [
     '-re',
-    // নেটওয়ার্ক বা ড্রাইভ কানেকশন ড্রপ প্রতিরোধ
     '-reconnect', '1',
     '-reconnect_streamed', '1',
     '-reconnect_at_eof', '0',
     '-reconnect_on_network_error', '1',
     '-reconnect_delay_max', '10',
+    '-multiple_requests', '1',
     '-user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
     '-i', streamInput,
-    // রেজোলিউশন ও অডিও স্ট্যান্ডার্ডাইজেশন
     '-map', '0:v:0',
     '-map', '0:a:0?',
-    '-c:v', 'libx264',
-    '-preset', 'ultrafast',
-    '-tune', 'zerolatency',
-    '-g', '50',
-    '-keyint_min', '50',
-    '-sc_threshold', '0',
+    '-c:v', 'copy',      // CPU 0% খরচ হবে, কোনো ল্যাগ বা ক্র্যাশ করবে না
     '-c:a', 'aac',
     '-b:a', '128k',
-    '-ar', '44100',
-    '-ac', '2',
     '-f', 'hls',
     '-hls_time', '4',
-    '-hls_list_size', '15',
-    // ভিডিও পরিবর্তনের সময় প্লেয়ার হ্যাং ও বাফারিং ঠেকানোর ফ্ল্যাগ
-    '-hls_flags', 'delete_segments+append_list+omit_endlist+discont_start',
-    '-hls_segment_filename', path.join(liveDir, 'seg_%08d.ts'),
+    '-hls_list_size', '6',
+    '-hls_flags', 'delete_segments+omit_endlist',
+    '-hls_segment_filename', path.join(liveDir, 'seg_%03d.ts'),
     m3u8File
   ];
 
@@ -178,32 +129,29 @@ async function startStream() {
 
   ffmpegProcess.stderr.on('data', (data) => {
     const msg = data.toString();
-    if (msg.includes('Error') || msg.includes('fatal')) {
-      console.error(`[FFMPEG ERROR]: ${msg.trim()}`);
+    if (msg.includes('Error') || msg.includes('Opening')) {
+      console.log(msg.trim());
     }
   });
 
   ffmpegProcess.on('close', (code) => {
-    console.log(`[STREAM] Video [${currentIndex + 1}] ended (Exit code: ${code})`);
+    console.log(`[STREAM] Video [${currentIndex + 1}] Finished. Moving to next.`);
     isStreaming = false;
     ffmpegProcess = null;
-
-    // পুরো ভিডিও সফলভাবে শেষ হওয়ার পর পরবর্তী ভিডিওতে যাবে
     currentIndex = (currentIndex + 1) % playlist.length;
     setTimeout(startStream, 1000);
   });
 
   ffmpegProcess.on('error', (err) => {
-    console.error('[STREAM ERROR]:', err.message);
+    console.error('[STREAM ERROR]:', err);
     isStreaming = false;
     ffmpegProcess = null;
-
-    // কোনো এরর হলে স্কিপ না করে একই ভিডিও আবার চালানোর চেষ্টা করবে
-    setTimeout(startStream, 3000);
+    currentIndex = (currentIndex + 1) % playlist.length;
+    setTimeout(startStream, 2000);
   });
 }
 
-// Render স্লিপ প্রতিরোধে সেলফ-পিং
+// Render স্লিপ প্রিভেন্টার
 setInterval(() => {
   if (process.env.RENDER_EXTERNAL_URL) {
     fetch(process.env.RENDER_EXTERNAL_URL).catch(() => {});
@@ -212,8 +160,7 @@ setInterval(() => {
 
 app.listen(PORT, () => {
   console.log(`Server listening on port ${PORT}`);
-
-  // ক্যাশ ফাইল পরিষ্কার করে স্ট্রিম চালু
+  // আগের জমে থাকা ক্যাশ ডিলিট
   fs.readdir(liveDir, (err, files) => {
     if (!err) {
       for (const file of files) {
