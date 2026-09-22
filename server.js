@@ -39,7 +39,7 @@ app.use('/live', express.static(liveDir, {
 }));
 
 app.get('/', (req, res) => {
-  res.send('BDStreamHub Live Server Active');
+  res.send('BDStreamHub Live Running!');
 });
 
 app.get('/status', (req, res) => {
@@ -51,10 +51,46 @@ app.get('/status', (req, res) => {
   });
 });
 
+// Google Drive theke direct signed stream URL extract kora
+function getDirectUrl(rawUrl) {
+  return new Promise((resolve) => {
+    let cleanUrl = rawUrl.trim();
+    const ytdlp = spawn('yt-dlp', [
+      '-g',
+      '-f', 'best[ext=mp4]/best',
+      '--no-check-certificates',
+      '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+      cleanUrl
+    ]);
+
+    let output = '';
+    ytdlp.stdout.on('data', (data) => {
+      output += data.toString();
+    });
+
+    ytdlp.on('close', (code) => {
+      const finalUrl = output.trim().split('\n')[0];
+      if (code === 0 && finalUrl.startsWith('http')) {
+        resolve(finalUrl);
+      } else {
+        const fileIdMatch = cleanUrl.match(/(?:id=|\/d\/)([a-zA-Z0-9_-]+)/);
+        if (fileIdMatch && fileIdMatch[1]) {
+          resolve(`https://drive.usercontent.google.com/download?id=${fileIdMatch[1]}&export=download&confirm=t`);
+        } else {
+          resolve(cleanUrl);
+        }
+      }
+    });
+
+    ytdlp.on('error', () => {
+      resolve(cleanUrl);
+    });
+  });
+}
+
 let playlist = [];
 let currentIndex = 0;
 let ffmpegProcess = null;
-let ytdlpProcess = null;
 let isStreaming = false;
 
 function loadPlaylist() {
@@ -68,7 +104,7 @@ function loadPlaylist() {
   return playlist.length > 0;
 }
 
-function startStream() {
+async function startStream() {
   if (isStreaming) return;
 
   if (!loadPlaylist()) {
@@ -77,26 +113,28 @@ function startStream() {
   }
 
   if (currentIndex >= playlist.length) {
-    currentIndex = 0; // ৫০০ শেষ হলে আবার প্রথম থেকে
+    currentIndex = 0;
   }
 
   const rawUrl = playlist[currentIndex];
+  console.log(`[STREAM] Fetching direct URL for Video [${currentIndex + 1}/${playlist.length}]`);
+  
+  const streamInput = await getDirectUrl(rawUrl);
   isStreaming = true;
 
-  console.log(`[STREAM] Starting Video [${currentIndex + 1}/${playlist.length}] -> ${rawUrl}`);
+  console.log(`[STREAM] Started FFmpeg for Video [${currentIndex + 1}]`);
 
-  // yt-dlp ড্রাইভ লিঙ্ক সরাসরি ডিকোড করে পাইপ দিয়ে পাঠাবে (কোনো 403 ব্লক খাবে না)
-  ytdlpProcess = spawn('yt-dlp', [
-    '-o', '-',
-    '--no-check-certificates',
-    '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-    rawUrl
-  ]);
-
-  // FFmpeg পাইপ থেকে ভিডিও নিয়ে সাথে সাথে HLS তৈরি করবে
   const ffmpegArgs = [
     '-re',
-    '-i', 'pipe:0',
+    // Strong reconnect settings network drop/throttling thekabe
+    '-reconnect', '1',
+    '-reconnect_streamed', '1',
+    '-reconnect_at_eof', '0',
+    '-reconnect_on_network_error', '1',
+    '-reconnect_delay_max', '15',
+    '-rw_timeout', '20000000', // 20s wait korbe network slow holeo close na hoye
+    '-user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+    '-i', streamInput,
     '-map', '0:v:0',
     '-map', '0:a:0?',
     '-c:v', 'copy',
@@ -104,56 +142,38 @@ function startStream() {
     '-b:a', '128k',
     '-f', 'hls',
     '-hls_time', '4',
-    '-hls_list_size', '6',
-    '-hls_flags', 'delete_segments+omit_endlist',
-    '-hls_segment_filename', path.join(liveDir, 'seg_%03d.ts'),
+    '-hls_list_size', '8',
+    '-hls_flags', 'delete_segments+append_list+omit_endlist+discont_start',
+    '-hls_segment_filename', path.join(liveDir, 'seg_%06d.ts'),
     m3u8File
   ];
 
   ffmpegProcess = spawn('ffmpeg', ffmpegArgs);
 
-  // পাইপ কানেকশন
-  ytdlpProcess.stdout.pipe(ffmpegProcess.stdin);
-
   ffmpegProcess.stderr.on('data', (data) => {
     const msg = data.toString();
-    if (msg.includes('Error') || msg.includes('Opening')) {
+    if (msg.includes('Error') || msg.includes('fatal')) {
       console.log(`[FFMPEG] ${msg.trim()}`);
     }
   });
 
-  ytdlpProcess.stderr.on('data', (data) => {
-    const msg = data.toString();
-    if (msg.includes('ERROR:')) {
-      console.error(`[YT-DLP ERROR] ${msg.trim()}`);
-    }
-  });
-
   ffmpegProcess.on('close', (code) => {
-    console.log(`[STREAM] Video finished. Next video starting...`);
-    cleanupAndNext();
+    console.log(`[STREAM] Video [${currentIndex + 1}] finished. Code: ${code}`);
+    isStreaming = false;
+    ffmpegProcess = null;
+    currentIndex = (currentIndex + 1) % playlist.length;
+    setTimeout(startStream, 1000);
   });
 
   ffmpegProcess.on('error', (err) => {
     console.error('[STREAM ERROR]:', err);
-    cleanupAndNext();
+    isStreaming = false;
+    ffmpegProcess = null;
+    setTimeout(startStream, 2000);
   });
 }
 
-function cleanupAndNext() {
-  if (ytdlpProcess) {
-    ytdlpProcess.kill();
-    ytdlpProcess = null;
-  }
-  if (ffmpegProcess) {
-    ffmpegProcess = null;
-  }
-  isStreaming = false;
-  currentIndex = (currentIndex + 1) % playlist.length;
-  setTimeout(startStream, 1500);
-}
-
-// Render স্লিপ প্রিভেন্টার
+// Render sleep prevention
 setInterval(() => {
   if (process.env.RENDER_EXTERNAL_URL) {
     fetch(process.env.RENDER_EXTERNAL_URL).catch(() => {});
