@@ -39,7 +39,7 @@ app.use('/live', express.static(liveDir, {
 }));
 
 app.get('/', (req, res) => {
-  res.send('BDStreamHub Live Running!');
+  res.send('BDStreamHub Live Server Active');
 });
 
 app.get('/status', (req, res) => {
@@ -51,29 +51,14 @@ app.get('/status', (req, res) => {
   });
 });
 
-/* =========================================================
-   গুগল ড্রাইভ ডিরেক্ট স্ট্রিম হ্যান্ডলার
-========================================================= */
-function getDirectStreamUrl(rawUrl) {
-  let cleanUrl = rawUrl.trim();
-  const fileIdMatch = cleanUrl.match(/(?:id=|\/d\/)([a-zA-Z0-9_-]+)/);
-
-  if (fileIdMatch && fileIdMatch[1]) {
-    const fileId = fileIdMatch[1];
-    return `https://drive.usercontent.google.com/download?id=${fileId}&export=download&confirm=t`;
-  }
-  return cleanUrl;
-}
-
 let playlist = [];
 let currentIndex = 0;
 let ffmpegProcess = null;
+let ytdlpProcess = null;
 let isStreaming = false;
 
 function loadPlaylist() {
-  if (!fs.existsSync(playlistFile)) {
-    return false;
-  }
+  if (!fs.existsSync(playlistFile)) return false;
 
   playlist = fs.readFileSync(playlistFile, 'utf8')
     .split(/\r?\n/)
@@ -92,29 +77,29 @@ function startStream() {
   }
 
   if (currentIndex >= playlist.length) {
-    currentIndex = 0;
+    currentIndex = 0; // ৫০০ শেষ হলে আবার প্রথম থেকে
   }
 
   const rawUrl = playlist[currentIndex];
-  const streamInput = getDirectStreamUrl(rawUrl);
   isStreaming = true;
 
-  console.log(`[STREAM] Starting Video [${currentIndex + 1}/${playlist.length}]`);
+  console.log(`[STREAM] Starting Video [${currentIndex + 1}/${playlist.length}] -> ${rawUrl}`);
 
-  // Render CPU বাঁচানোর জন্য আল্ট্রা-লাইট কপি মোড
+  // yt-dlp ড্রাইভ লিঙ্ক সরাসরি ডিকোড করে পাইপ দিয়ে পাঠাবে (কোনো 403 ব্লক খাবে না)
+  ytdlpProcess = spawn('yt-dlp', [
+    '-o', '-',
+    '--no-check-certificates',
+    '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+    rawUrl
+  ]);
+
+  // FFmpeg পাইপ থেকে ভিডিও নিয়ে সাথে সাথে HLS তৈরি করবে
   const ffmpegArgs = [
     '-re',
-    '-reconnect', '1',
-    '-reconnect_streamed', '1',
-    '-reconnect_at_eof', '0',
-    '-reconnect_on_network_error', '1',
-    '-reconnect_delay_max', '10',
-    '-multiple_requests', '1',
-    '-user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-    '-i', streamInput,
+    '-i', 'pipe:0',
     '-map', '0:v:0',
     '-map', '0:a:0?',
-    '-c:v', 'copy',      // CPU 0% খরচ হবে, কোনো ল্যাগ বা ক্র্যাশ করবে না
+    '-c:v', 'copy',
     '-c:a', 'aac',
     '-b:a', '128k',
     '-f', 'hls',
@@ -127,28 +112,45 @@ function startStream() {
 
   ffmpegProcess = spawn('ffmpeg', ffmpegArgs);
 
+  // পাইপ কানেকশন
+  ytdlpProcess.stdout.pipe(ffmpegProcess.stdin);
+
   ffmpegProcess.stderr.on('data', (data) => {
     const msg = data.toString();
     if (msg.includes('Error') || msg.includes('Opening')) {
-      console.log(msg.trim());
+      console.log(`[FFMPEG] ${msg.trim()}`);
+    }
+  });
+
+  ytdlpProcess.stderr.on('data', (data) => {
+    const msg = data.toString();
+    if (msg.includes('ERROR:')) {
+      console.error(`[YT-DLP ERROR] ${msg.trim()}`);
     }
   });
 
   ffmpegProcess.on('close', (code) => {
-    console.log(`[STREAM] Video [${currentIndex + 1}] Finished. Moving to next.`);
-    isStreaming = false;
-    ffmpegProcess = null;
-    currentIndex = (currentIndex + 1) % playlist.length;
-    setTimeout(startStream, 1000);
+    console.log(`[STREAM] Video finished. Next video starting...`);
+    cleanupAndNext();
   });
 
   ffmpegProcess.on('error', (err) => {
     console.error('[STREAM ERROR]:', err);
-    isStreaming = false;
-    ffmpegProcess = null;
-    currentIndex = (currentIndex + 1) % playlist.length;
-    setTimeout(startStream, 2000);
+    cleanupAndNext();
   });
+}
+
+function cleanupAndNext() {
+  if (ytdlpProcess) {
+    ytdlpProcess.kill();
+    ytdlpProcess = null;
+  }
+  if (ffmpegProcess) {
+    ffmpegProcess = null;
+  }
+  isStreaming = false;
+  currentIndex = (currentIndex + 1) % playlist.length;
+  setTimeout(startStream, 1500);
 }
 
 // Render স্লিপ প্রিভেন্টার
@@ -160,7 +162,6 @@ setInterval(() => {
 
 app.listen(PORT, () => {
   console.log(`Server listening on port ${PORT}`);
-  // আগের জমে থাকা ক্যাশ ডিলিট
   fs.readdir(liveDir, (err, files) => {
     if (!err) {
       for (const file of files) {
